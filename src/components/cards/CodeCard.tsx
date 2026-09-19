@@ -10,10 +10,14 @@ interface Props {
   size: SizeMode
   filename?: string
   compact?: boolean
+  /** 代码区自定义字体；undefined 表示沿用 JetBrains Mono */
+  font?: string
+  /** 代码字号倍率，默认 1 */
+  fontScale?: number
 }
 
 export const CodeCard = forwardRef<HTMLDivElement, Props>(function CodeCard(
-  { text, theme, size, filename, compact },
+  { text, theme, size, filename, compact, font, fontScale = 1 },
   ref,
 ) {
   const { code, lang: fenceLang } = extractCodeFromFence(text)
@@ -102,15 +106,20 @@ export const CodeCard = forwardRef<HTMLDivElement, Props>(function CodeCard(
 
           {/* code body */}
           <div
-            style={{
-              padding: '28px 32px 36px',
-              flex: 1,
-              fontFamily: '"JetBrains Mono", monospace',
-              fontSize: 18,
-              lineHeight: 1.6,
-              color: theme.textColor,
-              overflow: 'hidden',
-            }}
+            style={
+              {
+                padding: '28px 32px 36px',
+                flex: 1,
+                fontFamily: font ?? '"JetBrains Mono", monospace',
+                fontSize: Math.round(18 * fontScale),
+                lineHeight: 1.6,
+                color: theme.textColor,
+                overflow: 'hidden',
+                // shiki 会给自己的元素加内联样式，且 styles/index.css 里那条规则带
+                // !important，组件上的 fontFamily 压不过它，只能靠变量注入。
+                '--code-font': font,
+              } as React.CSSProperties
+            }
             dangerouslySetInnerHTML={{ __html: html }}
           />
         </div>

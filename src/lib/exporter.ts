@@ -77,7 +77,7 @@ async function rasterize(svgDataUrl: string, w: number, h: number): Promise<HTML
   const ctx = canvas.getContext('2d')!
   ctx.scale(PIXEL_RATIO, PIXEL_RATIO)
 
-  const PROBE = 192 // 探针分辨率要能看见小元素（如诗词卡印章字）的变化
+  const PROBE = 192 // 探针分辨率要能看见小元素（如落款这类小字号文字）的变化
   const probe = document.createElement('canvas')
   probe.width = PROBE
   probe.height = PROBE

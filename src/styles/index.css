@@ -68,7 +68,10 @@ body {
 .shiki,
 .shiki code {
   background: transparent !important;
-  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+  /* 字体走 CSS 变量：shiki 自带的内联样式与这里的 !important 会压掉组件上的
+     inline fontFamily，所以「字体」设置必须通过变量注入才生效。
+     未设置时回退 JetBrains Mono。 */
+  font-family: var(--code-font, 'JetBrains Mono', ui-monospace, monospace) !important;
 }
 .shiki {
   padding: 0;

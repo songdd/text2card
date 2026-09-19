@@ -1,10 +1,18 @@
 import { useState, type ChangeEvent } from 'react'
-import { Sparkles, X } from 'lucide-react'
+import { Sparkles, Wand2, X } from 'lucide-react'
+import type { Style } from '../lib/classifier'
+import { parsePoem } from '../lib/parsePoem'
 
 interface Props {
   value: string
   onChange: (v: string) => void
   className?: string
+  /** 生效风格，决定标题/作者这两个输入框的标签与是否显示解析按钮 */
+  style: Style
+  title: string
+  onTitle: (v: string) => void
+  author: string
+  onAuthor: (v: string) => void
 }
 
 // 首次引导提示是否已被关闭（localStorage 记住，永久不再弹）
@@ -29,7 +37,39 @@ const SAMPLES: { label: string; text: string }[] = [
   },
 ]
 
-export function Editor({ value, onChange, className = '' }: Props) {
+interface FieldSpec {
+  key: 'title' | 'author'
+  label: string
+  placeholder: string
+}
+
+/** 标题/作者在各风格下的叫法不同；代码卡的「标题」其实是文件名 */
+function fieldsOf(style: Style): FieldSpec[] {
+  switch (style) {
+    case 'code':
+      return [{ key: 'title', label: '文件名', placeholder: 'snippet.ts' }]
+    case 'quote':
+      return [{ key: 'author', label: '署名', placeholder: '—— 作者（可空）' }]
+    case 'prose':
+      return [
+        { key: 'title', label: '标题', placeholder: '一段标题' },
+        { key: 'author', label: '署名', placeholder: 'via @you' },
+      ]
+    case 'poetry':
+      return [
+        { key: 'title', label: '标题', placeholder: '题目' },
+        { key: 'author', label: '作者', placeholder: '作者朝代' },
+      ]
+  }
+}
+
+interface UndoState {
+  text: string
+  title: string
+  author: string
+}
+
+export function Editor({ value, onChange, className = '', style, title, onTitle, author, onAuthor }: Props) {
   const [showHint, setShowHint] = useState(() => {
     try {
       return localStorage.getItem(HINT_KEY) !== '1'
@@ -37,6 +77,10 @@ export function Editor({ value, onChange, className = '' }: Props) {
       return false
     }
   })
+  const [result, setResult] = useState<string | null>(null)
+  // 解析会改写正文，属于破坏性操作，所以留一次撤销
+  const [undoState, setUndoState] = useState<UndoState | null>(null)
+
   function dismissHint() {
     setShowHint(false)
     try {
@@ -52,7 +96,48 @@ export function Editor({ value, onChange, className = '' }: Props) {
     const dirty = value.trim() !== '' && !SAMPLES.some((s) => s.text === value)
     if (dirty && !window.confirm('用示例替换当前内容？正在编辑的文字会被覆盖。')) return
     onChange(sampleText)
+    setResult(null)
+    setUndoState(null)
   }
+
+  function handleText(next: string) {
+    onChange(next)
+    // 手动改动正文后，原先的解析结果与撤销点都不再对应，一并清掉
+    if (result) setResult(null)
+    if (undoState) setUndoState(null)
+  }
+
+  function analyze() {
+    const parsed = parsePoem(value)
+    if (!parsed.changed) {
+      setResult('没找出题目或作者，正文未改动。可手动填写，或把题目写成《…》。')
+      setUndoState(null)
+      return
+    }
+    setUndoState({ text: value, title, author })
+    onChange(parsed.body)
+    if (parsed.title) onTitle(parsed.title)
+    if (parsed.author) onAuthor(parsed.author)
+
+    const parts: string[] = []
+    if (parsed.title) parts.push(`题目「${parsed.title}」`)
+    if (parsed.author) parts.push(`作者「${parsed.author}」`)
+    const bodyLen = parsed.body.replace(/\s/g, '').length
+    setResult(`已解析：${parts.join(' · ')}，正文 ${bodyLen} 字（${parsed.notes.join('；')}）`)
+  }
+
+  function undo() {
+    if (!undoState) return
+    onChange(undoState.text)
+    onTitle(undoState.title)
+    onAuthor(undoState.author)
+    setUndoState(null)
+    setResult('已撤销解析')
+  }
+
+  const fields = fieldsOf(style)
+  // 代码卡的「标题」是文件名，从代码里解析文件名没有意义
+  const canParse = style !== 'code'
 
   return (
     <aside className={`h-full w-full shrink-0 flex-col border-r border-ink-200/60 bg-white/60 backdrop-blur md:w-[360px] ${className}`}>
@@ -88,13 +173,60 @@ export function Editor({ value, onChange, className = '' }: Props) {
       )}
       <textarea
         value={value}
-        onChange={(e: ChangeEvent<HTMLTextAreaElement>) => onChange(e.target.value)}
+        onChange={(e: ChangeEvent<HTMLTextAreaElement>) => handleText(e.target.value)}
         placeholder="在这里粘贴你想分享的文字、代码、Markdown 或诗词……"
         className="font-mono flex-1 resize-none bg-transparent p-5 text-[14px] leading-relaxed text-ink-800 outline-none placeholder:text-ink-300"
         spellCheck={false}
       />
-      <div className="border-t border-ink-200/60 px-5 py-3 text-xs text-ink-400">
-        {value.length} 字
+
+      {/* 标题/作者紧贴内容：它们本来就是从正文里拆出来的，放在这里才好对照 */}
+      <div className="border-t border-ink-200/60 px-5 py-3.5">
+        <div className="flex items-end gap-2">
+          {fields.map((f) => (
+            <label key={f.key} className="min-w-0 flex-1">
+              <span className="mb-1 block text-[11px] text-ink-400">{f.label}</span>
+              <input
+                type="text"
+                value={f.key === 'title' ? title : author}
+                onChange={(e) => (f.key === 'title' ? onTitle : onAuthor)(e.target.value)}
+                placeholder={f.placeholder}
+                spellCheck={false}
+                className="w-full rounded-md border border-ink-200 bg-white px-2.5 py-1.5 text-xs text-ink-800 outline-none transition placeholder:text-ink-300 focus:border-ink-600"
+              />
+            </label>
+          ))}
+        </div>
+
+        <div className="mt-2.5 flex items-center justify-between gap-2">
+          {canParse ? (
+            <button
+              onClick={analyze}
+              disabled={!value.trim()}
+              title="从上面的原文里拆出题目与作者，并把它们从正文中移出"
+              className="flex items-center gap-1.5 rounded-md border border-ink-200 bg-white px-2.5 py-1.5 text-xs font-medium text-ink-700 transition hover:border-ink-300 hover:text-ink-900 disabled:opacity-40"
+            >
+              <Wand2 className="h-3.5 w-3.5" />
+              解析题目 / 作者
+            </button>
+          ) : (
+            <span />
+          )}
+          <span className="text-xs tabular-nums text-ink-400">{value.length} 字</span>
+        </div>
+
+        {result && (
+          <div className="mt-2 flex items-start gap-2 rounded-md border border-ink-100 bg-ink-50 px-2.5 py-2 text-[11px] leading-relaxed text-ink-600">
+            <span className="flex-1">{result}</span>
+            {undoState && (
+              <button
+                onClick={undo}
+                className="shrink-0 rounded border border-ink-200 bg-white px-1.5 py-0.5 text-[11px] text-ink-600 transition hover:border-ink-300 hover:text-ink-800"
+              >
+                撤销
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </aside>
   )

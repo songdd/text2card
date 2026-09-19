@@ -3,6 +3,7 @@ export interface PoetryTheme {
   background: string
   text: string
   accent: string
+  /** 印章用色。只有打开「显示印章」时才会用到 */
   seal: string
   wash: string
 }

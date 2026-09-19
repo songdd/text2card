@@ -13,10 +13,14 @@ interface Props {
   eyebrow?: string
   signature?: string
   compact?: boolean
+  /** 正文与标题的自定义字体；undefined 表示沿用设计默认 */
+  font?: string
+  /** 正文与标题的字号倍率，默认 1 */
+  fontScale?: number
 }
 
 export const ProseCard = forwardRef<HTMLDivElement, Props>(function ProseCard(
-  { text, theme, size, title, eyebrow, signature, compact },
+  { text, theme, size, title, eyebrow, signature, compact, font, fontScale = 1 },
   ref,
 ) {
   const padX = size === 'landscape' ? 140 : 96
@@ -80,8 +84,8 @@ export const ProseCard = forwardRef<HTMLDivElement, Props>(function ProseCard(
         <article
           style={{
             flex: 1,
-            fontFamily: '"Fraunces Variable", "Noto Serif SC Variable", serif',
-            fontSize: 24,
+            fontFamily: font ?? '"Fraunces Variable", "Noto Serif SC Variable", serif',
+            fontSize: Math.round(24 * fontScale),
             lineHeight: 1.75,
             color: theme.text,
             overflow: 'hidden',
@@ -89,7 +93,7 @@ export const ProseCard = forwardRef<HTMLDivElement, Props>(function ProseCard(
         >
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
-            components={mdComponents(theme)}
+            components={mdComponents(theme, font, fontScale)}
           >
             {text || '在此粘贴你的笔记、文章或 Markdown 内容……'}
           </ReactMarkdown>
@@ -117,13 +121,16 @@ export const ProseCard = forwardRef<HTMLDivElement, Props>(function ProseCard(
   )
 })
 
-function mdComponents(theme: ProseTheme): Components {
+function mdComponents(theme: ProseTheme, font?: string, fontScale = 1): Components {
+  // 标题跟随字体设置，但眉头标签/署名等装饰性元信息保持 Inter
+  const headingFont = font ?? '"Fraunces Variable", "Noto Serif SC Variable", serif'
+  const hs = (n: number) => Math.round(n * fontScale)
   return {
     h1: ({ children }) => (
       <h2
         style={{
-          fontFamily: '"Fraunces Variable", "Noto Serif SC Variable", serif',
-          fontSize: 44,
+          fontFamily: headingFont,
+          fontSize: hs(44),
           lineHeight: 1.2,
           fontWeight: 600,
           margin: '32px 0 16px',
@@ -136,8 +143,8 @@ function mdComponents(theme: ProseTheme): Components {
     h2: ({ children }) => (
       <h3
         style={{
-          fontFamily: '"Fraunces Variable", "Noto Serif SC Variable", serif',
-          fontSize: 34,
+          fontFamily: headingFont,
+          fontSize: hs(34),
           lineHeight: 1.25,
           fontWeight: 600,
           margin: '28px 0 12px',
@@ -151,8 +158,8 @@ function mdComponents(theme: ProseTheme): Components {
     h3: ({ children }) => (
       <h4
         style={{
-          fontFamily: '"Fraunces Variable", "Noto Serif SC Variable", serif',
-          fontSize: 26,
+          fontFamily: headingFont,
+          fontSize: hs(26),
           lineHeight: 1.3,
           fontWeight: 600,
           margin: '24px 0 10px',

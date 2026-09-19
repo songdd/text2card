@@ -9,6 +9,11 @@ dev_log_personal/
 CODE_REVIEW.md
 CLAUDE.md
 
+# env / secrets（.env.example 是模板，必须提交）
+.env
+.env.*
+!.env.example
+
 # os / editor
 .DS_Store
 *.local

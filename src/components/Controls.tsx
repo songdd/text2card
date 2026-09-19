@@ -1,4 +1,8 @@
 import type { Style } from '../lib/classifier'
+import type { SceneState } from '../lib/useScene'
+import { FONT_SCALE_MAX, FONT_SCALE_MIN, type FontKey } from '../lib/fonts'
+import { FontPicker } from './FontPicker'
+import { ScenePanel } from './ScenePanel'
 import { SIZE_OPTIONS, type SizeMode } from './CardFrame'
 import { codeThemes } from '../themes/codeThemes'
 import { quoteThemes } from '../themes/quoteThemes'
@@ -14,14 +18,22 @@ interface Props {
   onCompact: (v: boolean) => void
   themeIndex: number
   onThemeIndex: (n: number) => void
-  title: string
-  onTitle: (s: string) => void
-  author: string
-  onAuthor: (s: string) => void
   eyebrow: string
   onEyebrow: (s: string) => void
   vertical: boolean
   onVertical: (v: boolean) => void
+  /** 诗词卡的 AI 背景状态（五字段 + 生成/拆解动作） */
+  scene: SceneState
+  fontKey: FontKey
+  onFontKey: (k: FontKey) => void
+  /** 正文与标题的字号倍率 */
+  fontScale: number
+  onFontScale: (v: number) => void
+  /** 诗词卡：显示印章 / 显示标点符号，都默认关 */
+  showSeal: boolean
+  onShowSeal: (v: boolean) => void
+  showPunct: boolean
+  onShowPunct: (v: boolean) => void
 }
 
 export function Controls({
@@ -33,14 +45,19 @@ export function Controls({
   onCompact,
   themeIndex,
   onThemeIndex,
-  title,
-  onTitle,
-  author,
-  onAuthor,
   eyebrow,
   onEyebrow,
   vertical,
   onVertical,
+  scene,
+  fontKey,
+  onFontKey,
+  fontScale,
+  onFontScale,
+  showSeal,
+  onShowSeal,
+  showPunct,
+  onShowPunct,
 }: Props) {
   const themes = pickThemes(style)
 
@@ -113,40 +130,16 @@ export function Controls({
         </div>
       </Section>
 
-      {style === 'code' && (
-        <Section title="文件名">
-          <Input value={title} onChange={onTitle} placeholder="snippet.ts" />
-        </Section>
-      )}
-
-      {style === 'quote' && (
-        <Section title="署名">
-          <Input value={author} onChange={onAuthor} placeholder="—— 作者（可空）" />
-        </Section>
-      )}
-
+      {/* 标题 / 作者 / 文件名已经移到左侧编辑栏（紧贴正文，且可从正文解析），
+          这里只保留各自风格独有的项 */}
       {style === 'prose' && (
-        <>
-          <Section title="眉头标签">
-            <Input value={eyebrow} onChange={onEyebrow} placeholder="NOTES · 2026" />
-          </Section>
-          <Section title="标题">
-            <Input value={title} onChange={onTitle} placeholder="一段标题" />
-          </Section>
-          <Section title="署名">
-            <Input value={author} onChange={onAuthor} placeholder="via @you" />
-          </Section>
-        </>
+        <Section title="眉头标签">
+          <Input value={eyebrow} onChange={onEyebrow} placeholder="NOTES · 2026" />
+        </Section>
       )}
 
       {style === 'poetry' && (
         <>
-          <Section title="标题">
-            <Input value={title} onChange={onTitle} placeholder="题目" />
-          </Section>
-          <Section title="作者">
-            <Input value={author} onChange={onAuthor} placeholder="作者朝代" />
-          </Section>
           <Section title="排版">
             <div className="flex rounded-md border border-ink-200 p-0.5 text-sm">
               <button
@@ -167,8 +160,67 @@ export function Controls({
               </button>
             </div>
           </Section>
+
+          <Section title="显示">
+            <div className="flex flex-col gap-1.5">
+              <Check
+                checked={showSeal}
+                onChange={onShowSeal}
+                label="显示印章"
+                hint="右下角那枚方章"
+              />
+              <Check
+                checked={showPunct}
+                onChange={onShowPunct}
+                label="显示标点符号"
+                hint="关掉即按古典竖排惯例隐去句读；编辑区原文不受影响"
+              />
+            </div>
+          </Section>
+
+          <ScenePanel scene={scene} />
         </>
       )}
+
+      <Section title="字号">
+        <div className="flex items-center gap-2">
+          <input
+            type="range"
+            min={FONT_SCALE_MIN}
+            max={FONT_SCALE_MAX}
+            step={0.05}
+            value={fontScale}
+            onChange={(e) => onFontScale(Number(e.target.value))}
+            className="min-w-0 flex-1 accent-ink-800"
+            aria-label="正文字号倍率"
+          />
+          <span className="w-10 shrink-0 text-right text-xs tabular-nums text-ink-600">
+            {Math.round(fontScale * 100)}%
+          </span>
+        </div>
+        <div className="mt-1 flex items-start justify-between gap-2">
+          <p className="text-[11px] leading-relaxed text-ink-400">
+            正文与标题的字号倍率。固定尺寸下放太大会被裁，预览顶部会提示。
+          </p>
+          {fontScale !== 1 && (
+            <button
+              onClick={() => onFontScale(1)}
+              className="shrink-0 rounded border border-ink-200 bg-white px-1.5 py-0.5 text-[11px] text-ink-600 transition hover:border-ink-300 hover:text-ink-800"
+            >
+              复位
+            </button>
+          )}
+        </div>
+      </Section>
+
+      {/*
+        字体放在最末，是刻意的：右栏是 overflow-y-auto 的窄栏，任何插在中间的新区块
+        都会把它下面所有内容往下推。这个区块一度放在「主题」后面，直接把「AI 背景」
+        挤出首屏，看起来就像功能消失了。新增区块请往末尾追加。
+      */}
+      <Section title="字体">
+        <FontPicker fontKey={fontKey} onFontKey={onFontKey} />
+      </Section>
     </aside>
   )
 }
@@ -181,6 +233,33 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       </div>
       {children}
     </section>
+  )
+}
+
+function Check({
+  checked,
+  onChange,
+  label,
+  hint,
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  label: string
+  hint?: string
+}) {
+  return (
+    <label className="flex cursor-pointer items-start gap-2">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-ink-800"
+      />
+      <span className="min-w-0">
+        <span className="text-xs text-ink-700">{label}</span>
+        {hint && <span className="mt-0.5 block text-[11px] leading-relaxed text-ink-400">{hint}</span>}
+      </span>
+    </label>
   )
 }
 

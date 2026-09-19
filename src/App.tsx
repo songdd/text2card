@@ -1,14 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Copy, Download, Eye, Github, Pencil, SlidersHorizontal, Sparkles } from 'lucide-react'
+import {
+  Check,
+  Copy,
+  Download,
+  Eye,
+  Github,
+  History,
+  Pencil,
+  Save,
+  SlidersHorizontal,
+  Sparkles,
+} from 'lucide-react'
 import { Editor } from './components/Editor'
 import { Preview } from './components/Preview'
 import { Controls } from './components/Controls'
+import { RecentPanel } from './components/RecentPanel'
 import { CodeCard } from './components/cards/CodeCard'
 import { QuoteCard } from './components/cards/QuoteCard'
 import { ProseCard } from './components/cards/ProseCard'
 import { PoetryCard } from './components/cards/PoetryCard'
 import { classify, type Style } from './lib/classifier'
 import { canCopyImage, copyPng, exportPng } from './lib/exporter'
+import { useScene } from './lib/useScene'
+import { useSnapshots } from './lib/useSnapshots'
+import type { Snapshot, SnapshotState } from './lib/snapshots'
+import {
+  FONT_SCALE_MAX,
+  FONT_SCALE_MIN,
+  fontFamilyOf,
+  ensureFontLoaded,
+  isFontKey,
+  type FontKey,
+} from './lib/fonts'
+import { normalizeScene, type Aspect, type CardBackground, type SceneFields } from '../shared/scene'
 import { SIZE_OPTIONS, type SizeMode } from './components/CardFrame'
 import { codeThemes } from './themes/codeThemes'
 import { quoteThemes } from './themes/quoteThemes'
@@ -30,6 +54,14 @@ interface PersistedState {
   eyebrow: string
   vertical: boolean
   compact: boolean
+  fontKey: FontKey
+  /** 正文与标题的字号倍率，1 = 标准 */
+  fontScale: number
+  /** 诗词卡的显示开关，默认关 */
+  showSeal: boolean
+  showPunct: boolean
+  /** 诗词卡拆解出的五个画面字段（只有文本，体积小，适合进 localStorage） */
+  scene?: SceneFields
 }
 
 // 首屏尺寸：已有持久化值则用它；否则手机默认 3:4 竖图（更适合竖屏分享），
@@ -73,6 +105,20 @@ export default function App() {
   const [eyebrow, setEyebrow] = useState(persisted.eyebrow ?? '')
   const [vertical, setVertical] = useState(persisted.vertical ?? true)
   const [compact, setCompact] = useState(persisted.compact ?? false)
+  const [fontKey, setFontKey] = useState<FontKey>(() =>
+    isFontKey(persisted.fontKey) ? persisted.fontKey : 'default',
+  )
+  // 两个显示开关都默认关：老的持久化数据里没有这两个字段，?? false 正好兼容
+  const [showSeal, setShowSeal] = useState(persisted.showSeal ?? false)
+  const [showPunct, setShowPunct] = useState(persisted.showPunct ?? false)
+  // 字号倍率。老数据没有这个字段 → 回落到 1；同时防止手工改坏成 NaN/越界
+  const [fontScale, setFontScale] = useState(() => {
+    const v = persisted.fontScale
+    return typeof v === 'number' && Number.isFinite(v) && v >= FONT_SCALE_MIN && v <= FONT_SCALE_MAX
+      ? v
+      : 1
+  })
+  const [recentOpen, setRecentOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [copying, setCopying] = useState(false)
   const [mobileTab, setMobileTab] = useState<'edit' | 'preview' | 'style'>('edit')
@@ -88,6 +134,29 @@ export default function App() {
   const detected = useMemo(() => classify(text), [text])
   const effective: Style = styleChoice === 'auto' ? detected : styleChoice
 
+  // 画幅只用于拼提示词里的画幅描述与留白要求；auto 是 1080 宽、高度自适应，
+  // 更接近竖图，所以归到 portrait。
+  const aspect: Aspect = size === 'landscape' ? 'landscape' : 'portrait'
+  const [initialScene] = useState(() => normalizeScene(persisted.scene))
+  const scene = useScene({
+    text,
+    title,
+    author,
+    aspect,
+    initial: initialScene,
+    onNotify: showToast,
+  })
+  const sceneFields = scene.fields
+
+  const snapshots = useSnapshots({ onNotify: showToast })
+  const font = fontFamilyOf(fontKey)
+
+  // 可选字体的 CSS 按需加载。持久化恢复、载入快照、手动切换都会走到这里，
+  // 所以只依赖 fontKey 就够。加载完成前文字先用回退字体渲染（font-display: swap）。
+  useEffect(() => {
+    void ensureFontLoaded(fontKey)
+  }, [fontKey])
+
   const cardRef = useRef<HTMLDivElement>(null)
 
   // 生效风格变化（含 auto 检测切换）时重置主题索引，避免停留在上个风格的主题位。
@@ -101,18 +170,107 @@ export default function App() {
     }
   }, [effective])
 
-  // 编辑状态自动保存（轻微防抖，避免每个按键都写 localStorage）
+  // 编辑状态自动保存（轻微防抖，避免每个按键都写 localStorage）。
+  // 注意：生成的背景图（data URL，动辄数 MB）刻意不落盘——localStorage 配额只有
+  // 5MB 左右，写进去会直接撑爆整个自动保存。字段文本才是需要留住的部分。
   useEffect(() => {
     const id = setTimeout(() => {
       try {
-        const state: PersistedState = { text, styleChoice, size, themeIndex, title, author, eyebrow, vertical, compact }
+        const state: PersistedState = {
+          text,
+          styleChoice,
+          size,
+          themeIndex,
+          title,
+          author,
+          eyebrow,
+          vertical,
+          compact,
+          fontKey,
+          fontScale,
+          showSeal,
+          showPunct,
+          scene: sceneFields,
+        }
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
       } catch {
         // localStorage 不可用（隐私模式/配额满）时静默放弃自动保存
       }
     }, 300)
     return () => clearTimeout(id)
-  }, [text, styleChoice, size, themeIndex, title, author, eyebrow, vertical, compact])
+  }, [
+    text,
+    styleChoice,
+    size,
+    themeIndex,
+    title,
+    author,
+    eyebrow,
+    vertical,
+    compact,
+    fontKey,
+    fontScale,
+    showSeal,
+    showPunct,
+    sceneFields,
+  ])
+
+  /** 把当前全部界面状态（含 AI 背景图）存成一条快照 */
+  async function handleSave() {
+    const state: SnapshotState = {
+      text,
+      styleChoice,
+      size,
+      themeIndex,
+      title,
+      author,
+      eyebrow,
+      vertical,
+      compact,
+      fontKey,
+      fontScale,
+      showSeal,
+      showPunct,
+      scene: sceneFields,
+      background: scene.background,
+    }
+    await snapshots.save(state, effective)
+  }
+
+  /**
+   * 载入一条快照。
+   *
+   * 关键点：必须提前把 prevEffective 对齐到「恢复后的生效风格」。否则下面
+   * setStyleChoice 引起 effective 变化，那个「风格变了就重置主题索引」的
+   * useEffect 会在本次渲染后触发，把刚恢复的 themeIndex 清成 0——
+   * 表现就是「载入后主题总是回到第一个」。
+   */
+  function handleRestore(snapshot: Snapshot) {
+    const s = snapshot.state
+    const nextEffective: Style = s.styleChoice === 'auto' ? classify(s.text) : s.styleChoice
+    prevEffective.current = nextEffective
+
+    setText(s.text)
+    setStyleChoice(s.styleChoice)
+    setSize(s.size)
+    setThemeIndex(s.themeIndex)
+    setTitle(s.title)
+    setAuthor(s.author)
+    setEyebrow(s.eyebrow)
+    setVertical(s.vertical)
+    setCompact(s.compact)
+    setFontKey(isFontKey(s.fontKey) ? s.fontKey : 'default')
+    setFontScale(
+      typeof s.fontScale === 'number' && Number.isFinite(s.fontScale) && s.fontScale >= FONT_SCALE_MIN && s.fontScale <= FONT_SCALE_MAX
+        ? s.fontScale
+        : 1,
+    )
+    setShowSeal(s.showSeal ?? false)
+    setShowPunct(s.showPunct ?? false)
+    scene.applyFields(s.scene)
+    scene.setBackground(s.background ?? null)
+    showToast('ok', `已载入「${snapshot.label}」`)
+  }
 
   function handleStyleChange(next: Style | 'auto') {
     setStyleChoice(next)
@@ -173,6 +331,11 @@ export default function App() {
     vertical,
     compact,
     cardRef,
+    background: scene.background,
+    font,
+    fontScale,
+    showSeal,
+    showPunct,
   })
 
   const stylePill = (
@@ -220,6 +383,30 @@ export default function App() {
         <div className="flex items-center gap-2 md:gap-3">
           <div className="hidden items-center gap-3 md:flex">{stylePill}</div>
 
+          <button
+            onClick={() => void handleSave()}
+            disabled={snapshots.saving}
+            title="把当前诗词、背景、AI 背景图和预览设置存进「最近」"
+            className="flex items-center gap-2 rounded-full border border-ink-200 bg-white px-2.5 py-2 text-sm font-medium text-ink-700 transition hover:border-ink-300 hover:text-ink-900 disabled:opacity-50 md:px-3"
+          >
+            <Save className="h-4 w-4" />
+            <span className="hidden whitespace-nowrap md:inline">{snapshots.saving ? '保存中…' : '保存'}</span>
+          </button>
+
+          <button
+            onClick={() => setRecentOpen(true)}
+            title={`最近保存（${snapshots.items.length}/20）`}
+            className="relative flex items-center gap-2 rounded-full border border-ink-200 bg-white px-2.5 py-2 text-sm font-medium text-ink-700 transition hover:border-ink-300 hover:text-ink-900 md:px-3"
+          >
+            <History className="h-4 w-4" />
+            <span className="hidden whitespace-nowrap md:inline">最近</span>
+            {snapshots.items.length > 0 && (
+              <span className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-ink-800 px-1 text-[10px] font-semibold leading-none text-white">
+                {snapshots.items.length}
+              </span>
+            )}
+          </button>
+
           {copySupported && (
             <button
               onClick={handleCopy}
@@ -247,7 +434,7 @@ export default function App() {
             target="_blank"
             rel="noreferrer"
             title="在 GitHub 上查看源码"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-ink-200 text-ink-500 transition hover:border-ink-300 hover:text-ink-800"
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full border border-ink-200 text-ink-500 transition hover:border-ink-300 hover:text-ink-800 sm:flex"
           >
             <Github className="h-4 w-4" />
           </a>
@@ -263,6 +450,11 @@ export default function App() {
         <Editor
           value={text}
           onChange={setText}
+          style={effective}
+          title={title}
+          onTitle={setTitle}
+          author={author}
+          onAuthor={setAuthor}
           className={`${mobileTab === 'edit' ? 'flex' : 'hidden'} md:flex`}
         />
         <Preview
@@ -281,14 +473,19 @@ export default function App() {
           onCompact={setCompact}
           themeIndex={themeIndex}
           onThemeIndex={setThemeIndex}
-          title={title}
-          onTitle={setTitle}
-          author={author}
-          onAuthor={setAuthor}
           eyebrow={eyebrow}
           onEyebrow={setEyebrow}
           vertical={vertical}
           onVertical={setVertical}
+          scene={scene}
+          fontKey={fontKey}
+          onFontKey={setFontKey}
+          fontScale={fontScale}
+          onFontScale={setFontScale}
+          showSeal={showSeal}
+          onShowSeal={setShowSeal}
+          showPunct={showPunct}
+          onShowPunct={setShowPunct}
         />
       </div>
 
@@ -311,6 +508,13 @@ export default function App() {
           )
         })}
       </nav>
+
+      <RecentPanel
+        open={recentOpen}
+        onClose={() => setRecentOpen(false)}
+        snapshots={snapshots}
+        onRestore={handleRestore}
+      />
 
       {toast && (
         <div
@@ -342,6 +546,11 @@ function renderCard({
   vertical,
   compact,
   cardRef,
+  background,
+  font,
+  fontScale,
+  showSeal,
+  showPunct,
 }: {
   style: Style
   text: string
@@ -353,6 +562,11 @@ function renderCard({
   vertical: boolean
   compact: boolean
   cardRef: React.RefObject<HTMLDivElement>
+  background: CardBackground | null
+  font?: string
+  fontScale: number
+  showSeal: boolean
+  showPunct: boolean
 }) {
   const safeIdx = (arr: any[]) => arr[Math.min(themeIndex, arr.length - 1)]
   switch (style) {
@@ -365,6 +579,8 @@ function renderCard({
           size={size}
           compact={compact}
           filename={title || undefined}
+          font={font}
+          fontScale={fontScale}
         />
       )
     case 'quote':
@@ -376,6 +592,8 @@ function renderCard({
           size={size}
           compact={compact}
           author={author || undefined}
+          font={font}
+          fontScale={fontScale}
         />
       )
     case 'prose':
@@ -389,6 +607,8 @@ function renderCard({
           title={title || undefined}
           eyebrow={eyebrow || undefined}
           signature={author || undefined}
+          font={font}
+          fontScale={fontScale}
         />
       )
     case 'poetry':
@@ -402,6 +622,11 @@ function renderCard({
           title={title || undefined}
           author={author || undefined}
           vertical={vertical}
+          background={background}
+          font={font}
+          fontScale={fontScale}
+          showSeal={showSeal}
+          showPunct={showPunct}
         />
       )
   }

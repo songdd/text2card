@@ -86,6 +86,19 @@ export function Preview({ size, children, className = '', onFitContent }: Props)
           )}
         </div>
       )}
+
+      {/*
+        预览缩放读数。
+        自适应模式下卡片会随内容长高，而 Preview 会把整张卡等比缩放到适应视口，
+        于是背景图、文字、印章「一起」变小——容易被误读成背景图自己变了大小。
+        把真实尺寸与缩放比例显示出来，这件事就自解释了。
+        注意它挂在预览容器上，不在 cardRef 里，所以不会被导出。
+      */}
+      <div className="pointer-events-none absolute bottom-3 right-3 z-10 rounded-full bg-ink-800/70 px-2.5 py-1 text-[11px] tabular-nums text-white/90">
+        {dim.width} × {Math.round(innerHeight || dim.height || dim.minHeight || 900)} · 预览{' '}
+        {Math.round(scale * 100)}%
+      </div>
+
       <div
         style={{
           width: dim.width * scale,

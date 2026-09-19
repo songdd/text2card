@@ -8,6 +8,10 @@ interface Props {
   theme: QuoteTheme
   size: SizeMode
   compact?: boolean
+  /** 正文自定义字体；undefined 表示沿用设计默认字体栈 */
+  font?: string
+  /** 正文字号倍率，默认 1 */
+  fontScale?: number
 }
 
 function pickFontSize(textLen: number, size: SizeMode): number {
@@ -23,10 +27,10 @@ function pickFontSize(textLen: number, size: SizeMode): number {
 }
 
 export const QuoteCard = forwardRef<HTMLDivElement, Props>(function QuoteCard(
-  { text, author, theme, size, compact },
+  { text, author, theme, size, compact, font, fontScale = 1 },
   ref,
 ) {
-  const fontSize = pickFontSize(text.length, size)
+  const fontSize = Math.round(pickFontSize(text.length, size) * fontScale)
   return (
     <CardFrame ref={ref} size={size} background={theme.background} compact={compact}>
       <div
@@ -59,7 +63,7 @@ export const QuoteCard = forwardRef<HTMLDivElement, Props>(function QuoteCard(
 
         <p
           style={{
-            fontFamily: '"Fraunces Variable", "Noto Serif SC Variable", serif',
+            fontFamily: font ?? '"Fraunces Variable", "Noto Serif SC Variable", serif',
             fontSize,
             lineHeight: 1.45,
             fontWeight: 500,
