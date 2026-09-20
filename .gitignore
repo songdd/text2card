@@ -9,6 +9,12 @@ dev_log_personal/
 CODE_REVIEW.md
 CLAUDE.md
 
+# 本地数据库：卡片、音频、字幕、配图都落在这里（是用户数据，不是代码）
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
 # env / secrets（.env.example 是模板，必须提交）
 .env
 .env.*

@@ -1,10 +1,11 @@
 import { useEffect } from 'react'
-import { Clock, RotateCcw, Trash2, X } from 'lucide-react'
+import { ArrowRight, Clock, RotateCcw, Trash2, X } from 'lucide-react'
 import type { Style } from '../lib/classifier'
 import type { SnapshotsState } from '../lib/useSnapshots'
 import type { Snapshot } from '../lib/snapshots'
-import { MAX_SNAPSHOTS } from '../lib/snapshots'
+import { RECENT_LIMIT } from '../lib/snapshots'
 import { fontLabelOf } from '../lib/fonts'
+import { timeAgo } from '../lib/format'
 import { SIZE_OPTIONS } from './CardFrame'
 import { codeThemes } from '../themes/codeThemes'
 import { quoteThemes } from '../themes/quoteThemes'
@@ -18,10 +19,14 @@ interface Props {
   onClose: () => void
   snapshots: SnapshotsState
   onRestore: (snapshot: Snapshot) => void
+  /** 跳到管理页看全部（弹层只显示最近若干条，不是保存上限） */
+  onOpenLibrary: () => void
 }
 
-export function RecentPanel({ open, onClose, snapshots, onRestore }: Props) {
-  const { items, loading, clear, remove } = snapshots
+export function RecentPanel({ open, onClose, snapshots, onRestore, onOpenLibrary }: Props) {
+  const { loading, clear, remove } = snapshots
+  // 弹层是「快速切图器」，只显示最近的若干条；完整列表在管理页
+  const items = snapshots.items.slice(0, RECENT_LIMIT)
 
   // Esc 关闭。依赖 open：关闭状态下不占用键盘事件。
   useEffect(() => {
@@ -52,7 +57,8 @@ export function RecentPanel({ open, onClose, snapshots, onRestore }: Props) {
             <Clock className="h-4 w-4 self-center text-ink-500" />
             <span className="font-medium text-ink-800">最近保存</span>
             <span className="text-xs tabular-nums text-ink-400">
-              {items.length}/{MAX_SNAPSHOTS}
+              {items.length}
+              {snapshots.items.length > items.length ? ` / 共 ${snapshots.items.length}` : ''}
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -84,8 +90,9 @@ export function RecentPanel({ open, onClose, snapshots, onRestore }: Props) {
             </p>
           </div>
         ) : (
-          <ul className="divide-y divide-ink-100">
-            {items.map((s) => (
+          <>
+            <ul className="divide-y divide-ink-100">
+              {items.map((s) => (
               <li key={s.id} className="group flex items-center gap-3 px-4 py-3 transition hover:bg-ink-50">
                 <button
                   onClick={() => {
@@ -140,7 +147,22 @@ export function RecentPanel({ open, onClose, snapshots, onRestore }: Props) {
               </li>
             ))}
           </ul>
+          </>
         )}
+
+        {/* 弹层只是快速切图器；完整列表（检索、多选、批量导出）在管理页 */}
+        <footer className="border-t border-ink-100 px-4 py-2.5">
+          <button
+            onClick={() => {
+              onClose()
+              onOpenLibrary()
+            }}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-ink-500 transition hover:bg-ink-50 hover:text-ink-800"
+          >
+            在「管理」页查看全部
+            <ArrowRight className="h-3.5 w-3.5" />
+          </button>
+        </footer>
       </div>
     </div>
   )
@@ -172,16 +194,4 @@ function themeNameOf(style: Style, themeIndex: number): string {
 
 function sizeLabelOf(size: string): string {
   return SIZE_OPTIONS.find((o) => o.value === size)?.label ?? size
-}
-
-function timeAgo(ts: number): string {
-  const diff = Date.now() - ts
-  const minutes = Math.floor(diff / 60000)
-  if (minutes < 1) return '刚刚'
-  if (minutes < 60) return `${minutes} 分钟前`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} 小时前`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days} 天前`
-  return new Date(ts).toLocaleDateString()
 }

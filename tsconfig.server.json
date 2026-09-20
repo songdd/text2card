@@ -1,0 +1,9 @@
+{
+  "//": "服务端（Vite 中间件 + 本地 SQLite 库）单独一套类型环境：需要 Node 的类型，而浏览器那一套（tsconfig.json）刻意不带 Node 类型，互不污染。检查命令：npx tsc -p tsconfig.server.json",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "include": ["server", "shared", "vite.config.ts"]
+}

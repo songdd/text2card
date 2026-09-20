@@ -2,6 +2,7 @@ import { useState, type ChangeEvent } from 'react'
 import { Sparkles, Wand2, X } from 'lucide-react'
 import type { Style } from '../lib/classifier'
 import { parsePoem } from '../lib/parsePoem'
+import { MAX_TAGS, normalizeTags, tagKey } from '../lib/tags'
 
 interface Props {
   value: string
@@ -13,6 +14,12 @@ interface Props {
   onTitle: (v: string) => void
   author: string
   onAuthor: (v: string) => void
+  /** 标签（1年级 / 人教 / 唐诗…） */
+  tags: string[]
+  /** 用函数式更新：一次要加/删多个标签时，读旧值回写会互相覆盖 */
+  onTags: React.Dispatch<React.SetStateAction<string[]>>
+  /** 已用过标签的统计，用于输入建议与一键添加 */
+  tagSuggestions: { tag: string; count: number }[]
 }
 
 // 首次引导提示是否已被关闭（localStorage 记住，永久不再弹）
@@ -20,20 +27,16 @@ const HINT_KEY = 'text2card.hint.dismissed.v1'
 
 const SAMPLES: { label: string; text: string }[] = [
   {
-    label: '金句',
-    text: '愿你慢慢长大，愿你有好运气，如果没有，愿你在不幸中学会慈悲。',
+    label: '五言',
+    text: '《山居秋暝》\n王维\n空山新雨后，天气晚来秋。\n明月松间照，清泉石上流。',
   },
   {
-    label: '代码',
-    text: `function greet(name: string) {\n  const message = \`Hello, \${name}!\`\n  console.log(message)\n  return message\n}\n\ngreet('world')`,
+    label: '七言',
+    text: '《早发白帝城》\n李白\n朝辞白帝彩云间，千里江陵一日还。\n两岸猿声啼不住，轻舟已过万重山。',
   },
   {
-    label: '长文',
-    text: `# 关于写作的笔记\n\n写作是一种思考方式。\n\n## 第一原则\n\n- 先把想法写下来，不要怕粗糙\n- 把动词改得更精确\n- 删掉每一个不必要的形容词\n\n> 写作的核心，是把模糊的想法变成清晰的句子。\n\n参考：\`https://example.com\``,
-  },
-  {
-    label: '诗词',
-    text: '《山居秋暝》\n空山新雨后\n天气晚来秋\n明月松间照\n清泉石上流',
+    label: '宋词',
+    text: '《如梦令》\n李清照\n昨夜雨疏风骤，浓睡不消残酒。\n试问卷帘人，却道海棠依旧。',
   },
 ]
 
@@ -69,7 +72,19 @@ interface UndoState {
   author: string
 }
 
-export function Editor({ value, onChange, className = '', style, title, onTitle, author, onAuthor }: Props) {
+export function Editor({
+  value,
+  onChange,
+  className = '',
+  style,
+  title,
+  onTitle,
+  author,
+  onAuthor,
+  tags,
+  onTags,
+  tagSuggestions,
+}: Props) {
   const [showHint, setShowHint] = useState(() => {
     try {
       return localStorage.getItem(HINT_KEY) !== '1'
@@ -160,7 +175,7 @@ export function Editor({ value, onChange, className = '', style, title, onTitle,
         <div className="flex items-start gap-2 border-b border-amber-200/70 bg-amber-50/80 px-5 py-2.5 text-xs leading-relaxed text-ink-600">
           <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
           <span className="flex-1">
-            粘贴或输入任意文本，自动识别风格并生成卡片；上方按钮可载入示例。
+            粘贴或输入诗词，左侧底部可一键拆出题目与作者；上方按钮可载入示例。
           </span>
           <button
             onClick={dismissHint}
@@ -174,7 +189,7 @@ export function Editor({ value, onChange, className = '', style, title, onTitle,
       <textarea
         value={value}
         onChange={(e: ChangeEvent<HTMLTextAreaElement>) => handleText(e.target.value)}
-        placeholder="在这里粘贴你想分享的文字、代码、Markdown 或诗词……"
+        placeholder="在这里粘贴诗词……（题目与作者可在下方填写，或点「解析题目 / 作者」自动拆出）"
         className="font-mono flex-1 resize-none bg-transparent p-5 text-[14px] leading-relaxed text-ink-800 outline-none placeholder:text-ink-300"
         spellCheck={false}
       />
@@ -228,6 +243,135 @@ export function Editor({ value, onChange, className = '', style, title, onTitle,
           </div>
         )}
       </div>
+
+      <TagEditor tags={tags} onTags={onTags} suggestions={tagSuggestions} />
     </aside>
+  )
+}
+
+/**
+ * 标签编辑区。
+ *
+ * 三件事必须一起做，否则标签功能会被用坏：
+ *   1. **输入即建**：回车或逗号结束一个标签，不必先点「添加」；
+ *   2. **已有标签一键加**：同一批卡片要打同一组标签（人教、1年级），
+ *      逐个手打必然打出「人教版 / 人教 / 人教 版」三种写法，筛选就废了；
+ *   3. **输入建议**（datalist）：拦一道拼写分裂。
+ */
+function TagEditor({
+  tags,
+  onTags,
+  suggestions,
+}: {
+  tags: string[]
+  onTags: React.Dispatch<React.SetStateAction<string[]>>
+  suggestions: { tag: string; count: number }[]
+}) {
+  const [draft, setDraft] = useState('')
+  const listId = 'text2card-tag-suggestions'
+
+  /**
+   * 一次加多个标签。
+   *
+   * 必须用**函数式更新**：粘贴「1年级,唐诗」会在同一次事件里连续加两个标签，
+   * 若每次都从 props 上的 `tags` 读旧值再回写，后一次会把前一次的结果覆盖掉
+   * ——实测就是「粘一串标签只剩最后一个」，而且界面上完全看不出报错。
+   */
+  function addMany(raws: string[]) {
+    const cleaned = raws.filter((r) => r.trim())
+    if (!cleaned.length) return
+    onTags((prev) => {
+      let next = prev
+      for (const raw of cleaned) next = normalizeTags([...next, raw])
+      return next
+    })
+    setDraft('')
+  }
+
+  function remove(tag: string) {
+    const key = tagKey(tag)
+    onTags((prev) => prev.filter((t) => tagKey(t) !== key))
+  }
+
+  const used = new Set(tags.map(tagKey))
+  const unused = suggestions.filter((s) => !used.has(tagKey(s.tag)))
+
+  return (
+    <div className="border-t border-ink-200/60 px-5 py-3.5">
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-[11px] text-ink-400">标签</span>
+        <span className="text-[11px] tabular-nums text-ink-300">
+          {tags.length}/{MAX_TAGS}
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1.5">
+        {tags.map((t) => (
+          <span
+            key={t}
+            className="flex items-center gap-1 rounded-full border border-ink-200 bg-white py-0.5 pl-2 pr-1 text-[11px] text-ink-700"
+          >
+            {t}
+            <button
+              onClick={() => remove(t)}
+              aria-label={`删除标签 ${t}`}
+              className="rounded-full p-0.5 text-ink-300 transition hover:bg-ink-100 hover:text-ink-700"
+            >
+              <X className="h-2.5 w-2.5" />
+            </button>
+          </span>
+        ))}
+
+        <input
+          value={draft}
+          list={listId}
+          disabled={tags.length >= MAX_TAGS}
+          onChange={(e) => {
+            // 逗号/顿号也会触发"收下这个标签"：粘贴一串标签时不用一个个敲回车
+            const v = e.target.value
+            if (/[,，、;；]/.test(v)) {
+              addMany(v.split(/[,，、;；]+/))
+              return
+            }
+            setDraft(v)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              if (draft.trim()) addMany([draft])
+            } else if (e.key === 'Backspace' && !draft && tags.length) {
+              onTags((prev) => prev.slice(0, -1))
+            }
+          }}
+          onBlur={() => {
+            if (draft.trim()) addMany([draft])
+          }}
+          placeholder={tags.length ? '+ 继续添加' : '输入标签，回车确认（1年级 / 人教…）'}
+          spellCheck={false}
+          className="min-w-[6rem] flex-1 rounded-md border border-dashed border-ink-200 bg-white px-2 py-1 text-[11px] text-ink-800 outline-none transition placeholder:text-ink-300 focus:border-ink-500 disabled:opacity-40"
+        />
+        <datalist id={listId}>
+          {unused.slice(0, 50).map((s) => (
+            <option key={s.tag} value={s.tag} />
+          ))}
+        </datalist>
+      </div>
+
+      {unused.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-1">
+          <span className="text-[11px] text-ink-300">用过：</span>
+          {unused.slice(0, 10).map((s) => (
+            <button
+              key={s.tag}
+              onClick={() => addMany([s.tag])}
+              title={`已被 ${s.count} 张卡片使用`}
+              className="rounded-full border border-ink-100 bg-ink-50 px-1.5 py-0.5 text-[11px] text-ink-500 transition hover:border-ink-300 hover:text-ink-800"
+            >
+              + {s.tag}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }

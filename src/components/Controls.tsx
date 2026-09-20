@@ -1,6 +1,8 @@
+import { Palette } from 'lucide-react'
 import type { Style } from '../lib/classifier'
 import type { SceneState } from '../lib/useScene'
 import { FONT_SCALE_MAX, FONT_SCALE_MIN, type FontKey } from '../lib/fonts'
+import { INK_PRESETS, normalizeInk } from '../lib/ink'
 import { FontPicker } from './FontPicker'
 import { ScenePanel } from './ScenePanel'
 import { SIZE_OPTIONS, type SizeMode } from './CardFrame'
@@ -34,6 +36,11 @@ interface Props {
   onShowSeal: (v: boolean) => void
   showPunct: boolean
   onShowPunct: (v: boolean) => void
+  /** 墨色覆盖（hex）。undefined = 跟随主题。只作用于诗词卡的正文与标题作者 */
+  inkText?: string
+  onInkText: (v: string | undefined) => void
+  inkAccent?: string
+  onInkAccent: (v: string | undefined) => void
 }
 
 export function Controls({
@@ -58,8 +65,14 @@ export function Controls({
   onShowSeal,
   showPunct,
   onShowPunct,
+  inkText,
+  onInkText,
+  inkAccent,
+  onInkAccent,
 }: Props) {
   const themes = pickThemes(style)
+  // 墨色要显示「跟随主题」时那格的实际颜色，所以取当前诗词主题本身
+  const poetryTheme = poetryThemes[Math.min(Math.max(themeIndex, 0), poetryThemes.length - 1)] ?? poetryThemes[0]
 
   return (
     <aside className={`h-full w-full shrink-0 flex-col gap-6 overflow-y-auto border-l border-ink-200/60 bg-white/60 p-5 backdrop-blur md:w-[320px] ${className}`}>
@@ -214,6 +227,34 @@ export function Controls({
       </Section>
 
       {/*
+        墨色插在「字号」和「字体」之间——三者都是文字外观，放一起才找得到。
+        这里插入只会把「字体」往下推，而字体本来就是最后一项，评论区那条
+        「新块往末尾追加」的约束（别把 AI 背景挤出首屏）在这里不受影响。
+      */}
+      {style === 'poetry' && (
+        <Section title="墨色">
+          <div className="flex flex-col gap-2.5">
+            <InkRow
+              label="正文"
+              value={inkText}
+              themeColor={poetryTheme.text}
+              onChange={onInkText}
+            />
+            <InkRow
+              label="标题·作者"
+              value={inkAccent}
+              themeColor={poetryTheme.accent}
+              onChange={onInkAccent}
+            />
+          </div>
+          <p className="mt-2 text-[11px] leading-relaxed text-ink-400">
+            默认跟随主题墨色，改了就以你的选择为准。AI 背景偏暗时选「月白」或「鎏金」这类浅色更清楚；
+            印章颜色固定跟随主题。
+          </p>
+        </Section>
+      )}
+
+      {/*
         字体放在最末，是刻意的：右栏是 overflow-y-auto 的窄栏，任何插在中间的新区块
         都会把它下面所有内容往下推。这个区块一度放在「主题」后面，直接把「AI 背景」
         挤出首屏，看起来就像功能消失了。新增区块请往末尾追加。
@@ -222,6 +263,76 @@ export function Controls({
         <FontPicker fontKey={fontKey} onFontKey={onFontKey} />
       </Section>
     </aside>
+  )
+}
+
+/**
+ * 一行墨色选择器：主题 / 预设色块 / 自定义取色器。
+ *
+ * 「主题」不是某个具体颜色，而是「把覆盖清掉」——它显示的是当前主题的
+ * text 或 accent，点了就回到 undefined。用一个文字按钮而不是色块来画它，
+ * 是为了和右边的预设色块区分开：它们点下去的行为不一样。
+ */
+function InkRow({
+  label,
+  value,
+  themeColor,
+  onChange,
+}: {
+  label: string
+  value?: string
+  themeColor: string
+  onChange: (v: string | undefined) => void
+}) {
+  const isPreset = INK_PRESETS.some((p) => p.value === value)
+  return (
+    <div className="flex items-start gap-2">
+      <span className="w-[4.5rem] shrink-0 pt-0.5 text-xs text-ink-700">{label}</span>
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+        <button
+          onClick={() => onChange(undefined)}
+          title={`跟随主题墨色（${themeColor}）`}
+          aria-pressed={!value}
+          className={`rounded border px-1.5 py-0.5 text-[11px] transition ${
+            !value
+              ? 'border-ink-800 bg-ink-800 text-white'
+              : 'border-ink-200 bg-white text-ink-600 hover:border-ink-400'
+          }`}
+        >
+          主题
+        </button>
+
+        {INK_PRESETS.map((p) => (
+          <button
+            key={p.value}
+            onClick={() => onChange(p.value)}
+            title={`${p.name}（${p.value}）`}
+            aria-label={p.name}
+            aria-pressed={value === p.value}
+            style={{ background: p.value }}
+            className={`h-5 w-5 rounded-full border border-ink-300 transition ${
+              value === p.value ? 'ring-2 ring-ink-800 ring-offset-1' : 'hover:scale-110'
+            }`}
+          />
+        ))}
+
+        {/* 原生取色器：覆盖在调色板图标上，点哪都能唤起 */}
+        <label
+          title="自定义颜色"
+          className={`relative flex h-5 w-5 cursor-pointer items-center justify-center rounded-full border bg-white transition ${
+            value && !isPreset ? 'border-ink-800 ring-2 ring-ink-800 ring-offset-1' : 'border-ink-300 hover:border-ink-500'
+          }`}
+        >
+          <Palette className="pointer-events-none h-3 w-3 text-ink-500" />
+          <input
+            type="color"
+            value={value ?? themeColor}
+            onChange={(e) => onChange(normalizeInk(e.target.value))}
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          />
+        </label>
+      </div>
+    </div>
   )
 }
 

@@ -64,6 +64,59 @@ body {
   border-radius: 4px;
 }
 
+/* 播放进度条：原生 range 的样式各浏览器差别很大，统一成细轨 + 实心进度。
+   已播部分用 --pct（组件里按当前时间写入）画渐变，不需要额外 DOM。 */
+.player-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+}
+.player-range:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.player-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    #38332c 0%,
+    #38332c var(--pct, 0%),
+    rgba(31, 28, 24, 0.14) var(--pct, 0%),
+    rgba(31, 28, 24, 0.14) 100%
+  );
+}
+.player-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: 999px;
+  background: #fff;
+  border: 2px solid #38332c;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+.player-range::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(31, 28, 24, 0.14);
+}
+.player-range::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: #38332c;
+}
+.player-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #fff;
+  border: 2px solid #38332c;
+}
+
 /* shiki output reset */
 .shiki,
 .shiki code {

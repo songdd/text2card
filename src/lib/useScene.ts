@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DEFAULT_SCRIM,
   composePrompt,
@@ -12,6 +12,7 @@ import {
   type SceneKey,
 } from '../../shared/scene'
 import { dissectPoem, generateBackgroundImage } from './arkClient'
+import { loadDraftBackground, saveDraftBackground } from './snapshots'
 
 export interface SceneState {
   fields: SceneFields
@@ -77,6 +78,46 @@ export function useScene({ text, title, author, aspect, initial, onNotify }: Opt
   const prompt = useMemo(() => composePrompt(fields, aspect), [fields, aspect])
   const ready = hasSceneContent(fields)
   const filled = filledCount(fields)
+
+  /**
+   * 背景图的持久化。
+   *
+   * 背景图放不进 localStorage（一张就有 1–5MB，配额 5MB 直接爆），所以单独存
+   * IndexedDB。少了这一步，「从『最近』载入快照 → 刷新页面」背景就会丢——
+   * 因为刷新后只恢复 localStorage 里的草稿，而草稿里没有图。
+   *
+   * hydrated 这面旗很关键：读取是异步的，写回必须等它读完，否则刚读出来的
+   * 图会被随后的「空值写回」立刻覆盖掉。
+   */
+  const hydrated = useRef(false)
+  useEffect(() => {
+    let cancelled = false
+    loadDraftBackground()
+      .then((saved) => {
+        if (cancelled) return
+        if (saved) setBackground(saved)
+      })
+      .catch(() => {
+        // 隐私模式等场景读不到就算了，不该因此让整个页面报错
+      })
+      .finally(() => {
+        hydrated.current = true
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!hydrated.current) return
+    // 防抖：拖蒙层滑杆时每一帧都会改 background，不防抖等于每帧写一次几 MB
+    const id = setTimeout(() => {
+      void saveDraftBackground(background).catch((err) => {
+        console.warn('[scene] 背景图保存失败：', err)
+      })
+    }, 500)
+    return () => clearTimeout(id)
+  }, [background])
 
   const dissect = useCallback(async () => {
     const { text: poem, title: t, author: a } = ctxRef.current

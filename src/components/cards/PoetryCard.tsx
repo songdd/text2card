@@ -21,6 +21,10 @@ interface Props {
   showPunct?: boolean
   /** 正文与标题的字号倍率，默认 1 */
   fontScale?: number
+  /** 正文墨色（hex）。不填 = 跟随主题的 text */
+  inkText?: string
+  /** 标题与作者墨色（hex）。不填 = 跟随主题的 accent */
+  inkAccent?: string
 }
 
 /**
@@ -32,7 +36,22 @@ interface Props {
 const PUNCT_RE = /[，。、；：！？,.!?;:…—﹑]/g
 
 export const PoetryCard = forwardRef<HTMLDivElement, Props>(function PoetryCard(
-  { text, theme, size, title, author, vertical = true, compact, background, font, showSeal = false, showPunct = false, fontScale = 1 },
+  {
+    text,
+    theme,
+    size,
+    title,
+    author,
+    vertical = true,
+    compact,
+    background,
+    font,
+    showSeal = false,
+    showPunct = false,
+    fontScale = 1,
+    inkText,
+    inkAccent,
+  },
   ref,
 ) {
   const padOuter = size === 'landscape' ? 100 : 120
@@ -64,6 +83,10 @@ export const PoetryCard = forwardRef<HTMLDivElement, Props>(function PoetryCard(
   const t = title || extractedTitle
   const a = author || extractedAuthor
   const isLong = displayLines.join('').length > 60
+  // 墨色：默认跟随主题，只有用户显式选过颜色才覆盖。印章不参与——
+  // 朱印是版式符号，跟着主题走才不会和正文字色互相打架。
+  const textColor = inkText ?? theme.text
+  const accentColor = inkAccent ?? theme.accent
 
   return (
     <CardFrame ref={ref} size={size} background={theme.background} compact={compact && !vertical}>
@@ -104,7 +127,7 @@ export const PoetryCard = forwardRef<HTMLDivElement, Props>(function PoetryCard(
           padding: padOuter,
           display: 'flex',
           flexDirection: 'column',
-          color: theme.text,
+          color: textColor,
         }}
       >
         {vertical ? (
@@ -112,7 +135,7 @@ export const PoetryCard = forwardRef<HTMLDivElement, Props>(function PoetryCard(
             lines={displayLines}
             title={t}
             author={a}
-            theme={theme}
+            accent={accentColor}
             isLong={isLong}
             font={font}
             fontScale={fontScale}
@@ -122,7 +145,7 @@ export const PoetryCard = forwardRef<HTMLDivElement, Props>(function PoetryCard(
             lines={displayLines}
             title={t}
             author={a}
-            theme={theme}
+            accent={accentColor}
             isLong={isLong}
             font={font}
             fontScale={fontScale}
@@ -139,7 +162,7 @@ function VerticalLayout({
   lines,
   title,
   author,
-  theme,
+  accent,
   isLong,
   font,
   fontScale = 1,
@@ -147,7 +170,7 @@ function VerticalLayout({
   lines: string[]
   title: string
   author?: string
-  theme: PoetryTheme
+  accent: string
   isLong: boolean
   font?: string
   fontScale?: number
@@ -176,7 +199,7 @@ function VerticalLayout({
             fontFamily: font ?? '"Ma Shan Zheng", "Noto Serif SC Variable", serif',
             fontSize: Math.round(64 * fontScale),
             letterSpacing: '0.4em',
-            color: theme.accent,
+            color: accent,
             marginTop: 20,
           }}
         >
@@ -209,7 +232,7 @@ function VerticalLayout({
             fontFamily: '"Noto Serif SC Variable", serif',
             fontSize: 22,
             letterSpacing: '0.3em',
-            color: theme.accent,
+            color: accent,
             marginTop: 80,
           }}
         >
@@ -224,7 +247,7 @@ function HorizontalLayout({
   lines,
   title,
   author,
-  theme,
+  accent,
   isLong,
   font,
   fontScale = 1,
@@ -232,7 +255,7 @@ function HorizontalLayout({
   lines: string[]
   title: string
   author?: string
-  theme: PoetryTheme
+  accent: string
   isLong: boolean
   font?: string
   fontScale?: number
@@ -255,7 +278,7 @@ function HorizontalLayout({
           style={{
             fontFamily: font ?? '"Ma Shan Zheng", serif',
             fontSize: Math.round(56 * fontScale),
-            color: theme.accent,
+            color: accent,
             marginBottom: 40,
             letterSpacing: '0.2em',
           }}
@@ -282,7 +305,7 @@ function HorizontalLayout({
             marginTop: 40,
             fontFamily: '"Noto Serif SC Variable", serif',
             fontSize: 22,
-            color: theme.accent,
+            color: accent,
             letterSpacing: '0.2em',
           }}
         >
