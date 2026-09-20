@@ -18,6 +18,7 @@ import type { FontKey } from './fonts'
 import type { Style } from './classifier'
 import { parsePoem } from './parsePoem'
 import { normalizeTags } from './tags'
+import { dataUrlBytes } from './thumb'
 import type { CardBackground, SceneFields } from '../../shared/scene'
 
 /**
@@ -147,6 +148,81 @@ export async function listSnapshots(): Promise<Snapshot[]> {
   return cards
 }
 
+// ------------------------------------------------------------ 配图（按需取回）
+
+/**
+ * 列表接口**不下发配图**（一张 1–3MB 的 data URL），只给体积数字；要看大图、导出、
+ * 备份时再单独取。这里做一层会话内缓存：同一张卡片（同 `updatedAt`）只取一次，
+ * 并发调用共用同一个请求。
+ *
+ * 判据是 `dataUrl` 是否为空——空串就是"图还没取回来"。服务端写入时也有兜底：
+ * 空 dataUrl 不会覆盖库里已有的配图。
+ */
+const bgCache = new Map<string, CardBackground | null>()
+const bgInflight = new Map<string, Promise<CardBackground | null>>()
+
+function bgKey(snapshot: Pick<Snapshot, 'id' | 'updatedAt'>): string {
+  return `${snapshot.id}:${snapshot.updatedAt ?? 0}`
+}
+
+/** 同步读缓存：已经取回过就返回完整配图，否则 null */
+export function cachedCardBackground(snapshot: Pick<Snapshot, 'id' | 'updatedAt' | 'state'>): CardBackground | null {
+  const own = snapshot.state.background
+  if (!own) return null
+  if (own.dataUrl) return own
+  return bgCache.get(bgKey(snapshot)) ?? null
+}
+
+/** 取这张卡片的完整配图；本来就没有配图时返回 null */
+export async function loadCardBackground(
+  snapshot: Pick<Snapshot, 'id' | 'updatedAt' | 'state'>,
+): Promise<CardBackground | null> {
+  const own = snapshot.state.background
+  if (!own) return null
+  if (own.dataUrl) return own
+  const key = bgKey(snapshot)
+  const hit = bgCache.get(key)
+  if (hit !== undefined) return hit
+  const running = bgInflight.get(key)
+  if (running) return running
+  const task = (async () => {
+    try {
+      const card = await getSnapshot(snapshot.id)
+      const bg = card?.state.background ?? null
+      bgCache.set(key, bg)
+      return bg
+    } finally {
+      bgInflight.delete(key)
+    }
+  })()
+  bgInflight.set(key, task)
+  return task
+}
+
+/**
+ * 拿到"带完整配图"的快照。**导出 PNG、打包备份、载入编辑页之前都要先过这一关**，
+ * 否则渲染出来的卡片会缺背景。没有配图的卡片原样返回。
+ */
+export async function withLoadedBackground(snapshot: Snapshot): Promise<Snapshot> {
+  const bg = await loadCardBackground(snapshot)
+  if (!bg || bg.dataUrl === snapshot.state.background?.dataUrl) return snapshot
+  return { ...snapshot, state: { ...snapshot.state, background: bg } }
+}
+
+/**
+ * 配图字节数。列表里只有服务端算好的 `bytes`；图取回来之后就以实际长度为准。
+ */
+export function backgroundBytesOf(state: Pick<SnapshotState, 'background'>): number {
+  const bg = state.background
+  if (!bg) return 0
+  return bg.bytes ?? dataUrlBytes(bg.dataUrl)
+}
+
+/** 只写缩略图（补缩略图时用，不会碰 state 里的配图） */
+export async function putCardThumb(id: string, thumb: string): Promise<void> {
+  await apiPatch(`/cards/${encodeURIComponent(id)}`, { thumb })
+}
+
 export async function putSnapshot(snapshot: Snapshot): Promise<void> {
   await apiPut(`/cards/${encodeURIComponent(snapshot.id)}`, snapshot)
 }
@@ -233,9 +309,9 @@ export async function addSnapshotTags(ids: string[], add: string[]): Promise<Sna
 /**
  * 给某张卡片关联（或更换）音频。
  *
- * 三次调用：读卡片 → 传音频文件 → 把元信息写回卡片。**不是原子的**（HTTP 没有跨资源的
- * 事务）：万一第三步失败，会剩下一个没有元信息的音频文件——重新关联一次就会覆盖它。
- * 这一点比"假装原子"更诚实，清理也简单。
+ * **一次请求完成**：服务端先写新文件、再把元信息落库、最后删旧文件，中间任何一步
+ * 失败都能退回去。以前这里是三次调用（读卡片 → 传文件 → 写元信息），第三步一失败
+ * 就会留下一个"没有元信息的音频文件"——界面上看不见，只有扫目录才发现。
  */
 export async function associateAudio(
   snapshotId: string,
@@ -247,19 +323,21 @@ export async function associateAudio(
       `音频 ${(file.size / 1024 / 1024).toFixed(1)}MB，超过 ${Math.round(MAX_AUDIO_BYTES / 1024 / 1024)}MB 上限。建议先压成 mp3。`,
     )
   }
-  const card = await getSnapshot(snapshotId)
-  if (!card) throw new Error('卡片不存在，可能已被删除')
+  const { card } = await apiUpload<{ card: Snapshot }>(
+    `/audio/${encodeURIComponent(snapshotId)}${audioQuery(info)}`,
+    file,
+  )
+  if (!card?.audio) throw new Error('音频已上传，但服务端没有返回元信息')
+  return card.audio
+}
 
-  const meta: AudioMeta = {
-    name: info.name,
-    type: file.type || '',
-    size: file.size,
-    updatedAt: Date.now(),
-    duration: info.duration,
+/** 关联/恢复音频时的查询串：文件名必带，时长能解出来才带 */
+function audioQuery(info: { name: string; duration?: number }): string {
+  const query = new URLSearchParams({ name: info.name })
+  if (typeof info.duration === 'number' && Number.isFinite(info.duration)) {
+    query.set('duration', String(info.duration))
   }
-  await apiUpload(`/audio/${encodeURIComponent(snapshotId)}?name=${encodeURIComponent(info.name)}`, file)
-  await apiPatch(`/cards/${encodeURIComponent(snapshotId)}`, { audio: meta })
-  return meta
+  return `?${query.toString()}`
 }
 
 /** 解除关联：删掉音频文件与卡片上的元信息 */
@@ -272,10 +350,9 @@ export async function getAudioBlob(id: string): Promise<Blob | null> {
   return await apiDownload(`/audio/${encodeURIComponent(id)}`)
 }
 
-/** 从备份恢复音频：文件 + 元信息照抄 */
+/** 从备份恢复音频：文件 + 元信息一次写完（同一次请求） */
 export async function restoreAudio(id: string, blob: Blob, meta: AudioMeta): Promise<void> {
-  await apiUpload(`/audio/${encodeURIComponent(id)}?name=${encodeURIComponent(meta.name)}`, blob)
-  await apiPatch(`/cards/${encodeURIComponent(id)}`, { audio: meta })
+  await apiUpload(`/audio/${encodeURIComponent(id)}${audioQuery({ name: meta.name, duration: meta.duration })}`, blob)
 }
 
 /**

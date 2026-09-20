@@ -117,8 +117,7 @@ body {
   border: 2px solid #38332c;
 }
 
-/* shiki output reset */
-.shiki,
+/* shiki output reset */.shiki,
 .shiki code {
   background: transparent !important;
   /* 字体走 CSS 变量：shiki 自带的内联样式与这里的 !important 会压掉组件上的
@@ -132,4 +131,43 @@ body {
   overflow: hidden;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/*
+ * 正在播放的那张卡片：一圈流动的光。
+ *
+ * 为什么是"外层留 2px、把渐变填在这 2px 里"，而不是 border-image：
+ * border-image 不吃 border-radius，渐变会在四个角上露出直角，非常扎眼。
+ * 渐变靠 background-position 自己平移，也比旋转 conic-gradient 稳——
+ * 后者要 @property 注册角度变量，浏览器支持不齐。
+ *
+ * 首尾同色 + background-size 放大，循环接缝就看不出来（这是"流动"而不是"跳变"的关键）。
+ */
+.playing-frame {
+  background-image: linear-gradient(115deg, #f59e0b, #ef4444, #a855f7, #06b6d4, #f59e0b);
+  background-size: 200% 200%;
+  animation: playing-flow 6s linear infinite;
+  box-shadow: 0 0 14px -2px rgba(245, 158, 11, 0.55);
+}
+
+/* 暂停但仍装载着的那张：同样一圈光，只是不动、也淡一些（一眼能看出"就是它"） */
+.playing-frame-idle {
+  background-image: linear-gradient(115deg, #fcd34d, #f59e0b, #fbbf24, #fcd34d);
+  box-shadow: 0 0 10px -3px rgba(245, 158, 11, 0.4);
+}
+
+@keyframes playing-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+/* 尊重"减少动态效果"：光还在，但不再流动 */
+@media (prefers-reduced-motion: reduce) {
+  .playing-frame {
+    animation: none;
+  }
 }

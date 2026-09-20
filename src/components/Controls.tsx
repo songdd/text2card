@@ -267,31 +267,43 @@ export function Controls({
 }
 
 /**
- * 一行墨色选择器：主题 / 预设色块 / 自定义取色器。
+ * 一行墨色选择器：默认 / 预设色块 / 自定义取色器。
  *
- * 「主题」不是某个具体颜色，而是「把覆盖清掉」——它显示的是当前主题的
- * text 或 accent，点了就回到 undefined。用一个文字按钮而不是色块来画它，
- * 是为了和右边的预设色块区分开：它们点下去的行为不一样。
+ * 「默认」不是某个具体颜色，而是「把覆盖清掉」——编辑页里它回落主题墨色，
+ * 歌词页里回落歌词本来的墨色。点了就回到 undefined。用一个文字按钮而不是色块
+ * 来画它，是为了和右边的预设色块区分开：它们点下去的行为不一样。
+ *
+ * 导出给歌词页复用（同一套预设色与同一个取色器，两处不会各长一样）。
  */
-function InkRow({
+export function InkRow({
   label,
   value,
   themeColor,
   onChange,
+  followLabel = '默认',
+  followHint,
+  compact = false,
 }: {
   label: string
   value?: string
   themeColor: string
   onChange: (v: string | undefined) => void
+  /** 「跟随」那个按钮上的字（编辑页写"主题"，歌词页写"默认"） */
+  followLabel?: string
+  followHint?: string
+  /** 窄面板用：标签放上面一行，色块铺满宽度（小窗外观面板只有 258px） */
+  compact?: boolean
 }) {
   const isPreset = INK_PRESETS.some((p) => p.value === value)
   return (
-    <div className="flex items-start gap-2">
-      <span className="w-[4.5rem] shrink-0 pt-0.5 text-xs text-ink-700">{label}</span>
+    <div className={compact ? 'flex flex-col gap-1' : 'flex items-start gap-2'}>
+      <span className={compact ? 'text-[11px] text-ink-700' : 'w-[4.5rem] shrink-0 pt-0.5 text-xs text-ink-700'}>
+        {label}
+      </span>
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
         <button
           onClick={() => onChange(undefined)}
-          title={`跟随主题墨色（${themeColor}）`}
+          title={followHint ?? `跟随主题墨色（${themeColor}）`}
           aria-pressed={!value}
           className={`rounded border px-1.5 py-0.5 text-[11px] transition ${
             !value
@@ -299,7 +311,7 @@ function InkRow({
               : 'border-ink-200 bg-white text-ink-600 hover:border-ink-400'
           }`}
         >
-          主题
+          {followLabel}
         </button>
 
         {INK_PRESETS.map((p) => (

@@ -30,6 +30,9 @@ export interface LibraryStatus {
   cards: number
   audioFiles: number
   audioBytes: number
+  /** 配图文件数与体积（图存在 data/images/ 下，库里只留元信息） */
+  imageFiles: number
+  imageBytes: number
   dbBytes: number
 }
 

@@ -38,10 +38,5 @@ export async function makeThumb(dataUrl: string, width = THUMB_WIDTH): Promise<s
   }
 }
 
-/** 粗略估算一条 data URL 的字节数（base64 解出来约 3/4） */
-export function dataUrlBytes(dataUrl: string | undefined): number {
-  if (!dataUrl) return 0
-  const comma = dataUrl.indexOf(',')
-  const body = comma >= 0 ? dataUrl.length - comma - 1 : dataUrl.length
-  return Math.round((body * 3) / 4)
-}
+/** 粗略估算一条 data URL 的字节数（base64 解出来约 3/4）。服务端也要用，放在 shared 里 */
+export { dataUrlBytes } from '../../shared/scene'

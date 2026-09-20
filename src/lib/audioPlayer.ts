@@ -25,6 +25,11 @@ export interface PlayerState {
   playing: boolean
   /** 正在从 IndexedDB 取音频/起播的卡片 id */
   loadingId: string | null
+  /**
+   * 刷新回来时被浏览器拦了自动播放（音频已就位、只差一次手势）。
+   * 界面据此在播放条上常驻一句"点 ▶ 继续"——只弹一条几秒就消失的提示等于没说。
+   */
+  resumeBlocked?: boolean
 }
 
 /** 时间状态：只给播放条与歌词页订阅 */
@@ -130,12 +135,27 @@ export interface PlayerPrefs {
   queue: string[]
   /** 队列是否被用户手动改过（改过就沿用，没改过则每次按当前筛选重建） */
   custom: boolean
+  /**
+   * 这份队列叫什么（歌单名 / 「选中的 3 首」/「当前筛选」）。
+   *
+   * 队列本身只是一串 id，界面上"现在放的是什么"就无从说起——播放条上的队列按钮
+   * 悬浮只报得出数量。名字跟着队列一起记，刷新后也还在。
+   * null = 没名字（例如用户手动拖过之后仍沿用旧名，或干脆没来源）
+   */
+  queueName: string | null
 }
 
 const PREFS_KEY = 'text2card.player.v1'
 
 function loadPrefs(): PlayerPrefs {
-  const fallback: PlayerPrefs = { mode: 'sequential', volume: 1, muted: false, queue: [], custom: false }
+  const fallback: PlayerPrefs = {
+    mode: 'sequential',
+    volume: 1,
+    muted: false,
+    queue: [],
+    custom: false,
+    queueName: null,
+  }
   try {
     const raw = localStorage.getItem(PREFS_KEY)
     if (!raw) return fallback
@@ -147,6 +167,7 @@ function loadPrefs(): PlayerPrefs {
       muted: Boolean(data.muted),
       queue: Array.isArray(data.queue) ? data.queue.filter((x): x is string => typeof x === 'string') : [],
       custom: Boolean(data.custom),
+      queueName: typeof data.queueName === 'string' && data.queueName.trim() ? data.queueName.trim() : null,
     }
   } catch {
     return fallback
@@ -195,6 +216,96 @@ export function getPlayerPrefs(): PlayerPrefs {
   return prefs
 }
 
+// -------------------------------------------------- 续播书签（刷新后接着播）
+
+/**
+ * 刷新后接着播。
+ *
+ * 为什么单独一条记录、不塞进 `PlayerPrefs`：位置每几秒就要更新一次，而 `PlayerPrefs`
+ * 一变，所有订阅它的界面（播放条、队列面板）都会重渲染——为了记个书签让界面每 3 秒
+ * 重画一次不值得。所以书签自己一条 localStorage，**写它不通知任何人**。
+ *
+ * 记的是「哪一首 + 第几秒 + 当时是否在播」：
+ *   - 在播 → 刷新后自动接着播，位置也接上
+ *   - 暂停 → 刷新后把这首摆回播放条、停在原处，但**不自动响**（用户自己按的暂停）
+ *   - 离开太久（超过窗口）→ 同样摆回来但不自动播：隔夜回来突然出声是会吓人的
+ */
+const RESUME_KEY = 'text2card.resume.v1'
+/** 超过这个间隔就不再自动起播（仍然把这首摆回播放条、停在原处） */
+const RESUME_AUTOPLAY_MS = 2 * 60 * 60 * 1000
+/** 位置写盘的最小间隔：刷新最多丢两三秒，不必让 localStorage 每次都写 */
+const RESUME_SAVE_MS = 3000
+
+interface ResumeBookmark {
+  id: string
+  time: number
+  playing: boolean
+  at: number
+}
+
+function loadResume(): ResumeBookmark | null {
+  try {
+    const raw = localStorage.getItem(RESUME_KEY)
+    if (!raw) return null
+    const d = JSON.parse(raw) as Partial<ResumeBookmark>
+    if (typeof d.id !== 'string' || !d.id) return null
+    return {
+      id: d.id,
+      time: typeof d.time === 'number' && Number.isFinite(d.time) && d.time > 0 ? d.time : 0,
+      playing: d.playing === true,
+      at: typeof d.at === 'number' && Number.isFinite(d.at) ? d.at : 0,
+    }
+  } catch {
+    return null
+  }
+}
+
+let resume: ResumeBookmark | null = loadResume()
+let lastResumeSave = 0
+
+function writeResume(next: ResumeBookmark | null) {
+  resume = next
+  try {
+    if (next) localStorage.setItem(RESUME_KEY, JSON.stringify(next))
+    else localStorage.removeItem(RESUME_KEY)
+  } catch {
+    // 隐私模式写不了：本次会话内仍然生效
+  }
+}
+
+/** 记下"现在放到哪了"。`force` = 关键时机（暂停、离开页面）立刻写，不吃节流 */
+function bookmark(force = false) {
+  const media = el
+  const id = state.currentId
+  if (!media || !id || !media.getAttribute('src')) return
+  const now = Date.now()
+  if (!force && now - lastResumeSave < RESUME_SAVE_MS) return
+  lastResumeSave = now
+  writeResume({
+    id,
+    time: media.currentTime || 0,
+    // "在不在播"以媒体元素为准：只看内存态会在 pause 事件之前写错
+    playing: !media.paused && !media.ended,
+    at: now,
+  })
+}
+
+/** 用户明确停止、或卡片没了 —— 不该在下次刷新时又冒出来 */
+function clearBookmark() {
+  writeResume(null)
+}
+
+let lifecycleBound = false
+/** 刷新/关页签前把**精确**位置补写一次：timeupdate 有节流，最后一笔可能没落盘 */
+function bindLifecycle() {
+  if (lifecycleBound) return
+  lifecycleBound = true
+  window.addEventListener('pagehide', () => bookmark(true))
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') bookmark(true)
+  })
+}
+
 function reshuffle() {
   const list = [...prefs.queue]
   for (let i = list.length - 1; i > 0; i--) {
@@ -237,10 +348,27 @@ export function toggleMute() {
   if (el) el.muted = muted
 }
 
-/** 设置队列。`custom` 表示这是用户手动挑/改过的（刷新后沿用） */
-export function setQueue(ids: string[], custom = false) {
-  setPrefs({ queue: ids, custom })
+/**
+ * 设置队列。`custom` 表示这是用户手动挑/改过的（刷新后沿用）。
+ * `name` 省略 = 沿用当前名字（手动拖排序不该把名字弄丢）；传 null = 明确清掉。
+ */
+export function setQueue(ids: string[], custom = false, name?: string | null) {
+  setPrefs({
+    queue: ids,
+    custom,
+    ...(name === undefined ? {} : { queueName: name && name.trim() ? name.trim() : null }),
+  })
   reshuffle()
+}
+
+/** 改队列的名字（例如刚把它「存为歌单」） */
+export function setQueueName(name: string | null) {
+  setPrefs({ queueName: name && name.trim() ? name.trim() : null })
+}
+
+/** 这份队列叫什么：歌单名 / 「选中的 3 首」/「当前筛选」；没名字时返回 null */
+export function queueName(): string | null {
+  return prefs.queueName
 }
 
 export function removeFromQueue(id: string) {
@@ -317,17 +445,26 @@ function element(): HTMLAudioElement {
   a.preload = 'metadata'
   a.volume = prefs.volume
   a.muted = prefs.muted
-  a.addEventListener('timeupdate', () => setTime(a.currentTime, a.duration))
+  a.addEventListener('timeupdate', () => {
+    setTime(a.currentTime, a.duration)
+    bookmark()
+  })
   a.addEventListener('loadedmetadata', () => setTime(a.currentTime, a.duration))
   a.addEventListener('durationchange', () => setTime(a.currentTime, a.duration))
-  a.addEventListener('seeked', () => setTime(a.currentTime, a.duration))
+  a.addEventListener('seeked', () => {
+    setTime(a.currentTime, a.duration)
+    bookmark()
+  })
   a.addEventListener('play', () => {
-    setState({ ...state, playing: true })
+    // 真的响起来了：把"被自动播放策略拦住"的标记撤掉
+    setState({ ...state, playing: true, resumeBlocked: false })
     startPump()
+    bookmark(true)
   })
   a.addEventListener('pause', () => {
     setState({ ...state, playing: false })
     stopPump()
+    bookmark(true)
   })
   a.addEventListener('ended', () => {
     stopPump()
@@ -346,20 +483,72 @@ function element(): HTMLAudioElement {
     // 顺序播放且只有一首：停在开头，播放条留在原位
     a.currentTime = 0
     setState({ ...state, playing: false })
+    bookmark(true)
   })
   a.addEventListener('error', () => {
     const failed = state.currentId
     releaseUrl()
+    clearBookmark()
     reset()
     if (failed) errorSink?.('音频播放失败：文件可能损坏或格式不被浏览器支持')
   })
   document.body.appendChild(a)
   el = a
+  bindLifecycle()
   return a
 }
 
-/** 装载并播放某一首（不含"同一首暂停/继续"的判断，那由 togglePlay 负责） */
-async function playTrack(id: string, onError?: (msg: string) => void): Promise<void> {
+/** 等元数据到位（续播要定位就得先有 duration；读不出来也不能卡住起播） */
+function waitMetadata(a: HTMLAudioElement, timeoutMs = 3000): Promise<void> {
+  if (a.readyState >= 1) return Promise.resolve()
+  return new Promise((resolve) => {
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      a.removeEventListener('loadedmetadata', finish)
+      window.clearTimeout(timer)
+      resolve()
+    }
+    const timer = window.setTimeout(finish, timeoutMs)
+    a.addEventListener('loadedmetadata', finish)
+  })
+}
+
+/** 把秒数夹进时长内（末尾留一点余量，免得一进去就触发 ended） */
+function clampTime(seconds: number, duration: number): number {
+  if (!Number.isFinite(duration) || duration <= 0) return Math.max(0, seconds)
+  return Math.min(Math.max(0, seconds), Math.max(0, duration - 0.3))
+}
+
+/** `NotAllowedError` = 浏览器按自动播放策略拦了 play()，不是"播放失败" */
+function isAutoplayBlocked(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'NotAllowedError'
+}
+
+/**
+ * 被后来的操作打断（`play()` 抛 `AbortError`）——这是竞态，不是失败。
+ *
+ * 典型场景：装载期间又点了一下同一首/另一首，元素被 pause 或换了 src。
+ * 以前这种错误和"文件损坏"走同一条路（`reset()`），于是整个播放器被清空、
+ * 播放条直接消失——用户只会看到"点了两下，播放器就没了"。
+ */
+function isInterrupted(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError'
+}
+
+/**
+ * 装载并播放某一首（不含"同一首暂停/继续"的判断，那由 togglePlay 负责）。
+ *
+ * `startAt` = 从第几秒开始（续播用）；`autoPlay=false` 时只装载、定位，不起播
+ * （暂停状态下刷新回来就是这种：播放条摆回原处，等你按 ▶）。
+ */
+async function playTrack(
+  id: string,
+  onError?: (msg: string) => void,
+  startAt = 0,
+  autoPlay = true,
+): Promise<void> {
   const a = element()
   // 先掐掉上一首。这一步是「同时播放」的唯一防线，且必须在 await 之前做，
   // 否则取音频的这段时间里旧的还在响。
@@ -381,6 +570,18 @@ async function playTrack(id: string, onError?: (msg: string) => void): Promise<v
     a.src = objectUrl
     a.volume = prefs.volume
     a.muted = prefs.muted
+    // 定位要等元数据到位：元数据没来时浏览器会忽略 currentTime
+    if (startAt > 0) {
+      await waitMetadata(a)
+      if (mine !== token) return
+      a.currentTime = clampTime(startAt, a.duration)
+      setTime(a.currentTime, a.duration)
+    }
+    if (!autoPlay) {
+      setState({ currentId: id, playing: false, loadingId: null })
+      bookmark(true)
+      return
+    }
     await a.play()
     if (mine !== token) {
       a.pause()
@@ -389,9 +590,55 @@ async function playTrack(id: string, onError?: (msg: string) => void): Promise<v
     setState({ currentId: id, playing: true, loadingId: null })
     setTime(a.currentTime, a.duration)
   } catch (err) {
-    if (mine === token) reset()
+    if (mine !== token) return
+    // 被打断（play() 抛 AbortError）：不是失败。状态归打断它的那次操作管，
+    // 这里只把"转圈"收掉，绝不清空播放器——否则播放条会凭空消失。
+    if (isInterrupted(err)) {
+      if (state.currentId === id && state.loadingId === id) setState({ ...state, loadingId: null })
+      return
+    }
+    // 刷新后没有交互就 play()，浏览器会按自动播放策略拦下来。这不是"播放失败"：
+    // 音频其实已经装好并停在原处，等一次手势而已——保留这一首，让 ▶ 接着放。
+    if (isAutoplayBlocked(err)) {
+      if (startAt > 0) {
+        a.currentTime = clampTime(startAt, a.duration)
+        setTime(a.currentTime, a.duration)
+      }
+      setState({ currentId: id, playing: false, loadingId: null, resumeBlocked: true })
+      bookmark(true)
+      onError?.('浏览器拦住了自动播放：音频已经就位，点一下 ▶ 就接着听')
+      return
+    }
+    reset()
     onError?.(err instanceof Error ? err.message : String(err))
   }
+}
+
+let resumeTried = false
+
+/**
+ * 启动时把上次那首接回来。
+ *
+ * 只尝试一次（严格模式下组件会挂载两次）。返回是否真的接着响起来了。
+ */
+export async function resumeLastSession(onNote?: (msg: string) => void): Promise<boolean> {
+  if (resumeTried) return false
+  resumeTried = true
+  const book = resume
+  if (!book || state.currentId) return false
+  const fresh = Date.now() - book.at <= RESUME_AUTOPLAY_MS
+  const shouldPlay = book.playing && fresh
+  try {
+    await playTrack(book.id, (msg) => onNote?.(msg), book.time, shouldPlay)
+  } catch {
+    // 卡片已被删除、服务没起来……静默放弃：启动阶段不该为此弹错
+  }
+  if (state.playing) return true
+  if (!shouldPlay && state.currentId === book.id) {
+    // 摆回来了但没自动播（暂停状态或离开太久）——说一声，别让人以为"刷新后没反应"
+    onNote?.('上次那首已恢复到播放条，停在原处，按 ▶ 继续')
+  }
+  return false
 }
 
 /**
@@ -404,6 +651,15 @@ async function playTrack(id: string, onError?: (msg: string) => void): Promise<v
 export async function togglePlay(id: string, onError?: (msg: string) => void): Promise<void> {
   errorSink = onError ?? null
   const a = element()
+
+  /*
+   * 正在装载这一首：这次点击先不理会。
+   *
+   * 不理会是有意的——以前会再起一次装载，两个 `playTrack` 互相打断：
+   * 前一次的 `play()` 抛 AbortError，被当成"播放失败"清空了整个播放器，
+   * 播放条当场消失。装载本来马上就会开始播，多点一下不该有任何副作用。
+   */
+  if (state.loadingId === id) return
 
   if (state.currentId === id) {
     if (state.playing) {
@@ -429,14 +685,38 @@ export async function playTrackById(id: string, onError?: (msg: string) => void)
   await playTrack(id, onError)
 }
 
-/** 从队列的某一首开始播放（点全局播放键 / 点卡片 ▶ 都走这里） */
+/**
+ * 从队列的某一首开始播放（点全局播放键 / 点卡片 ▶ / 点歌单 都走这里）。
+ *
+ * `custom`  = 这份队列是用户明确选的（歌单），不是从当前筛选推出来的。
+ * `restart` = 这是「从头播放」这类明确要求：即使要播的这首正在播，也要回到开头。
+ * `name`    = 这份队列的名字（歌单名 / 「选中的 3 首」/「当前筛选」），显示在播放条上。
+ */
 export async function startPlayback(
   ids: string[],
   startId: string,
   onError?: (msg: string) => void,
+  options: { custom?: boolean; restart?: boolean; name?: string | null } = {},
 ): Promise<void> {
-  setQueue(ids, false)
-  if (state.currentId === startId && state.playing) return
+  // 先比一比新旧队列：下面要靠它判断"这次点击到底有没有事情可做"
+  const sameQueue = prefs.queue.length === ids.length && prefs.queue.every((id, i) => id === ids[i])
+  setQueue(ids, options.custom ?? false, options.name === undefined ? undefined : options.name)
+
+  /*
+   * 要播的这首**已经装着、而且正在播**。
+   *
+   * 这里曾经直接 return，于是"点歌单没反应"：如果歌单的第一首正好是当前在播的那首，
+   * 点下去什么都不发生（连进度都不动），可按钮上明明写着"播放这个歌单"，
+   * 提示也在说"播放「某某」"——用户只会认为按钮坏了。
+   *
+   * 所以改成：
+   *   - 换了队列（换歌单/换筛选）或调用方明确要求从头 → 把这首**从头放**，点击就有反应
+   *   - 同一份队列又点一次、也没要求从头 → 确实没什么可做，不动它，免得平白把歌切回开头
+   */
+  if (state.currentId === startId && el?.getAttribute('src') && state.playing) {
+    if (options.restart || !sameQueue) seek(0)
+    return
+  }
   await togglePlay(startId, onError)
 }
 
@@ -484,6 +764,7 @@ export function stopIfPlaying(id: string) {
   releaseUrl()
   if (el) el.removeAttribute('src')
   setTime(0, 0)
+  clearBookmark()
   reset()
 }
 
@@ -494,5 +775,6 @@ export function stopAll() {
   releaseUrl()
   if (el) el.removeAttribute('src')
   setTime(0, 0)
+  clearBookmark()
   reset()
 }

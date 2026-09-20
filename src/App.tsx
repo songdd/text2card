@@ -21,7 +21,7 @@ import { QueuePanel } from './components/QueuePanel'
 import { BootScreen, ServerDownScreen, useLibraryServer } from './components/ServerGate'
 import { MigrateDialog } from './components/MigrateDialog'
 import { migrationDone, peekLegacyData, serverCardCount, type LegacyPreview } from './lib/migrate'
-import { setQueue, startPlayback, useAudioPlayer } from './lib/audioPlayer'
+import { resumeLastSession, setQueue, startPlayback, useAudioPlayer } from './lib/audioPlayer'
 import { requestPersist } from './lib/storage'
 import { usePlaylists } from './lib/usePlaylists'
 import type { Playlist } from './lib/snapshots'
@@ -33,7 +33,7 @@ import { useScene } from './lib/useScene'
 import { useSnapshots } from './lib/useSnapshots'
 import { useHashRoute } from './lib/useHashRoute'
 import type { Snapshot, SnapshotState } from './lib/snapshots'
-import { snapshotKeyOf } from './lib/snapshots'
+import { loadCardBackground, snapshotKeyOf } from './lib/snapshots'
 import {
   FONT_SCALE_MAX,
   FONT_SCALE_MIN,
@@ -232,6 +232,20 @@ function Workspace() {
   useEffect(() => {
     void requestPersist()
   }, [])
+
+  /**
+   * 刷新后接着播。
+   *
+   * 页面一刷新，`<audio>` 和内存态全没了——不接回来的话，正在听的音乐会静悄悄地断掉，
+   * 连播放条都消失（用户只会觉得"刷新了一下就不播了"）。播放器里存了一条续播书签
+   * （哪一首 + 第几秒 + 当时是否在播），这里在界面挂载后接上。
+   *
+   * 两种情况会只摆回播放条、不自动响：本来处于暂停状态，或离开超过两小时——
+   * 隔夜回来突然出声是会被吓到的。浏览器拦自动播放时也会给一句提示。
+   */
+  useEffect(() => {
+    void resumeLastSession((msg) => showToast('err', msg))
+  }, [])
   // 已用过的标签（含使用次数），喂给编辑页做输入建议与一键添加
   const tagSuggestions = useMemo(() => collectTags(snapshots.items), [snapshots.items])
 
@@ -261,10 +275,13 @@ function Workspace() {
   /** 播放队列面板：重建队列（true = 同时从头播） */
   function rebuildQueue(play: boolean) {
     const ids = queueSource.length ? queueSource : snapshots.items.filter((s) => s.audio).map((s) => s.id)
-    setQueue(ids, false)
     if (play && ids.length) {
-      void startPlayback(ids, ids[0], (m) => showToast('err', m))
+      // 「从头播放」= 明确要求回到第一首的开头（队列由 startPlayback 一并写入）
+      // 名字用「当前筛选」：这个按钮的字面意思就是"按当前筛选重建"
+      void startPlayback(ids, ids[0], (m) => showToast('err', m), { restart: true, name: '当前筛选' })
       setQueueOpen(false)
+    } else {
+      setQueue(ids, false, '当前筛选')
     }
     // 「按当前筛选重建」**不关面板**：用户重建后通常想继续看这份新队列
   }
@@ -272,6 +289,9 @@ function Workspace() {
   /**
    * 按歌单播放：只取仍然存在且**还有音频**的卡片，顺序沿用歌单自己的顺序
    * （不是管理页的排序）——歌单的意义就在于顺序是你定的。
+   *
+   * `custom: true`：这份队列是用户明确点出来的，别被"当前筛选"悄悄替换掉。
+   * `name`：队列跟着歌单的名字，播放条上悬浮就能看到现在放的是哪一份。
    */
   function playPlaylist(playlist: Playlist) {
     const byId = new Map(snapshots.items.map((s) => [s.id, s]))
@@ -282,8 +302,7 @@ function Workspace() {
       return
     }
     const ids = alive.map((s) => s.id)
-    setQueue(ids, true)
-    void startPlayback(ids, ids[0], (m) => showToast('err', m))
+    void startPlayback(ids, ids[0], (m) => showToast('err', m), { custom: true, name: playlist.name })
     showToast('ok', dead ? `播放「${playlist.name}」，已跳过 ${dead} 首失效卡片` : `播放「${playlist.name}」`)
   }
 
@@ -381,6 +400,10 @@ function Workspace() {
    *
    * 这里不再需要处理「风格变化 → 主题索引被重置」的竞态：风格已固定为诗词，
    * 不会因载入而变化，所以 themeIndex 恢复多少就是多少。
+   *
+   * 配图是**异步补上**的：列表接口不下发配图（一张 1–3MB），载入瞬间先把文字、
+   * 排版、主题全部落位，图取回来再补一层。这样点「载入」是零等待，
+   * 也不会出现"编辑页里配图不见了"的错觉；服务端写入时同样不会用空图覆盖已有配图。
    */
   function handleRestore(snapshot: Snapshot) {
     const s = snapshot.state
@@ -407,6 +430,17 @@ function Workspace() {
     scene.applyFields(s.scene)
     scene.setBackground(s.background ?? null)
     showToast('ok', `已载入「${snapshot.label}」`)
+
+    // 配图后到：取回来再补上，取不到就保持主题底（不打断已经载入好的内容）
+    if (s.background && !s.background.dataUrl && s.background.bytes) {
+      void loadCardBackground(snapshot)
+        .then((bg) => {
+          if (bg) scene.setBackground(bg)
+        })
+        .catch(() => {
+          showToast('err', '配图读取失败，先按主题底显示；重新载入一次可再试')
+        })
+    }
   }
 
   async function handleExport() {

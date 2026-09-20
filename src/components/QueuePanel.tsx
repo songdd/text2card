@@ -8,6 +8,7 @@ import {
   playTrackById,
   removeFromQueue,
   setQueue,
+  setQueueName,
   togglePlay,
   useAudioPlayer,
   usePlayerPrefs,
@@ -82,6 +83,8 @@ export function QueuePanel({
       // 同名视为"更新同一份歌单"，避免攒出一堆「一年级晨读」「一年级晨读(2)」
       const existing = playlists.find((p) => p.name === name.trim())
       await onSavePlaylist(name.trim(), prefs.queue)
+      // 存下来之后这份队列就有名字了：播放条上悬浮立刻能看出放的是哪一份
+      setQueueName(name.trim())
       if (!existing) setSaving(false)
       setName('')
       setSaving(false)
@@ -105,6 +108,10 @@ export function QueuePanel({
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-ink-100 px-4 py-3">
           <span className="flex min-w-0 items-center gap-2">
             <span className="font-medium text-ink-800">播放队列</span>
+            {/* 队列的名字（歌单名 / 选中的 3 首 / 当前筛选）：与播放条上的悬浮提示同一份 */}
+            {prefs.queueName && (
+              <span className="max-w-[10rem] truncate text-[11px] text-ink-500">「{prefs.queueName}」</span>
+            )}
             <span className="text-[11px] text-ink-400">
               {prefs.queue.length} 首 · {PLAY_MODE_LABEL[prefs.mode]}
             </span>

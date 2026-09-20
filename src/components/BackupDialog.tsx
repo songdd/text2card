@@ -4,7 +4,7 @@ import { backupFileName, exportBackup, importBackup, type ExportProgress } from 
 import { downloadBlob } from '../lib/exportSnapshot'
 import { formatBytes } from '../lib/format'
 import type { LegacyPreview } from '../lib/migrate'
-import type { Snapshot } from '../lib/snapshots'
+import { backgroundBytesOf, type Snapshot } from '../lib/snapshots'
 
 /**
  * 备份 / 恢复对话框。
@@ -35,7 +35,9 @@ export function BackupDialog({
   const fileRef = useRef<HTMLInputElement>(null)
 
   const audioCount = snapshots.filter((s) => s.audio).length
-  const imageCount = snapshots.filter((s) => s.state.background?.dataUrl).length
+  // 列表里配图是瘦身过的（dataUrl 为空），所以判"有没有配图"只看 background 存不存在
+  const imageCount = snapshots.filter((s) => s.state.background).length
+  const imageBytes = snapshots.reduce((sum, s) => sum + backgroundBytesOf(s.state), 0)
   const lyricCount = snapshots.filter((s) => s.audio?.lyricText).length
 
   async function handleExport() {
@@ -128,12 +130,14 @@ export function BackupDialog({
               <span className="text-xs font-medium text-ink-700">导出完整备份</span>
               <span className="flex items-center gap-1 text-[11px] text-ink-400">
                 <Database className="h-3 w-3" />
-                {snapshots.length} 张 · 音频 {audioCount} · 配图 {imageCount} · 字幕 {lyricCount}
+                {snapshots.length} 张 · 音频 {audioCount} · 配图 {imageCount}
+                {imageBytes > 0 ? `（${formatBytes(imageBytes)}）` : ''} · 字幕 {lyricCount}
               </span>
             </div>
             <p className="text-[11px] leading-relaxed text-ink-400">
               ZIP 里是：卡片数据（含标签、墨色、主题、字体、时间轴）+ 音频原文件 + 字幕文件 + AI 配图。
               可以直接用解压工具打开翻看，也能在别的机器上恢复。
+              {imageCount > 0 && ' 配图会在打包时逐张读取，稍等一下。'}
             </p>
             <button
               onClick={() => void handleExport()}

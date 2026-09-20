@@ -2,11 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Archive,
   CheckSquare,
+  ChevronDown,
+  ChevronUp,
   Download,
   FileArchive,
   Grid2x2,
   List,
   Loader2,
+  Filter,
   Music,
   Play,
   Search,
@@ -57,6 +60,33 @@ const SORT_LABEL: Record<SortKey, string> = {
   updated: '最近更新',
   created: '创建时间',
   title: '标题',
+}
+
+/** 工具条收起的偏好（跨会话记住） */
+const TOOLS_KEY = 'text2card.library-tools.v1'
+
+function readToolsCollapsed(): boolean {
+  try {
+    return localStorage.getItem(TOOLS_KEY) === 'collapsed'
+  } catch {
+    return false
+  }
+}
+
+/** 每页最多显示多少张卡片 */
+const PAGE_SIZE = 20
+
+/** 页码序列：页数多时省略中间（1 … 4 5 6 … 12） */
+function pageNumbers(current: number, total: number): (number | '…')[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1)
+  const out: (number | '…')[] = [1]
+  const from = Math.max(2, current - 1)
+  const to = Math.min(total - 1, current + 1)
+  if (from > 2) out.push('…')
+  for (let i = from; i <= to; i++) out.push(i)
+  if (to < total - 1) out.push('…')
+  out.push(total)
+  return out
 }
 
 /**
@@ -123,6 +153,28 @@ export function LibraryPage({
   const [busy, setBusy] = useState<string | null>(null)
   const [progress, setProgress] = useState<BatchProgress | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  /** 分页：每页最多 PAGE_SIZE 张 */
+  const [page, setPage] = useState(1)
+  /** 歌单筛选：只看某个歌单里的卡片（和搜索、预设是同一层的筛选口径） */
+  const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null)
+  /** 列表滚动容器（翻页后回到顶部用） */
+  const listRef = useRef<HTMLDivElement>(null)
+
+  /**
+   * 工具条收起状态（把整页留给卡片）。
+   *
+   * 记在 localStorage 里：这是个"我想要什么版面"的偏好，每次进管理页都要重新收一遍
+   * 就太烦了。收起的是**工具条**，不是功能——筛选条件仍以一行文字回显（否则
+   * "怎么只剩 3 张"会变成谜），选中卡片后的批量操作也照旧露出来（不然勾了却删不掉）。
+   */
+  const [toolsCollapsed, setToolsCollapsed] = useState(readToolsCollapsed)
+  useEffect(() => {
+    try {
+      localStorage.setItem(TOOLS_KEY, toolsCollapsed ? 'collapsed' : 'expanded')
+    } catch {
+      // 隐私模式写不了：本次会话内仍然生效
+    }
+  }, [toolsCollapsed])
 
   const parsed = useMemo(() => parseQuery(query), [query])
   const keywords = parsed.terms
@@ -141,16 +193,27 @@ export function LibraryPage({
     [presets, activePresetId],
   )
 
+  /** 正在筛选的歌单（点歌单旁边的漏斗图标选中的那个） */
+  const activePlaylist = useMemo(
+    () => playlists.find((p) => p.id === activePlaylistId) ?? null,
+    [playlists, activePlaylistId],
+  )
+  const playlistIds = useMemo(
+    () => (activePlaylist ? new Set(activePlaylist.cardIds) : null),
+    [activePlaylist],
+  )
+
   const filtered = useMemo(() => {
-    const filtering = keywords.length > 0 || Boolean(activePreset)
+    const filtering = keywords.length > 0 || Boolean(activePreset) || Boolean(playlistIds)
     const hit = filtering
       ? items.filter((s) => {
-          // 关键词与预设是两个独立的筛选口径，同时生效时取交集
+          // 关键词、预设、歌单是三个独立的筛选口径，同时生效时取交集
           const fields = fieldTexts.get(s.id)
           if (keywords.length && !(fields && matchesTerms(fields, keywords, matchAll ? 'all' : 'any'))) {
             return false
           }
           if (activePreset && !matchesCombos(tagsOf.get(s.id) ?? [], activePreset.combos)) return false
+          if (playlistIds && !playlistIds.has(s.id)) return false
           return true
         })
       : items.slice()
@@ -161,7 +224,34 @@ export function LibraryPage({
       return kb - ka
     })
     return hit
-  }, [items, keywords, matchAll, fieldTexts, tagsOf, activePreset, sort])
+  }, [items, keywords, matchAll, fieldTexts, tagsOf, activePreset, playlistIds, sort])
+
+  /** 分页切片。列表**只渲染这一页**——几百张卡片全挂进 DOM 才是真卡顿 */
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const pageItems = useMemo(
+    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [filtered, page],
+  )
+
+  // 筛选/排序一变就回到第一页：还停在"第 3 页"看新结果，多半是个空页面
+  useEffect(() => {
+    setPage(1)
+  }, [query, activePresetId, activePlaylistId, sort])
+
+  // 删卡片、清空之后当前页可能已经越界，夹回来
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount)
+  }, [page, pageCount])
+
+  // 歌单被删掉时筛选跟着取消，免得停在一个不存在的口径上
+  useEffect(() => {
+    if (activePlaylistId && !playlists.some((p) => p.id === activePlaylistId)) setActivePlaylistId(null)
+  }, [activePlaylistId, playlists])
+
+  // 翻页后回到列表顶部（不回到顶部的话，第二页会从半空开始显示）
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: 0 })
+  }, [page])
 
   /**
    * 批量搜索的反馈：哪些条件在库里**一个都没找到**。
@@ -205,6 +295,7 @@ export function LibraryPage({
   const clearFilters = useCallback(() => {
     setQuery('')
     setActivePresetId(null)
+    setActivePlaylistId(null)
     setMatchAll(false)
   }, [])
 
@@ -283,9 +374,13 @@ export function LibraryPage({
       }
       const skipped = selected.size - selectedPlayable.length
       const ids = source.map((s) => s.id)
-      setQueue(ids, false)
+      // 队列的名字：勾选了就叫「选中的 N 首」，否则是「当前筛选」——
+      // 播放条上悬浮能看出现在放的到底是哪一份
+      const name = selectedPlayable.length ? `选中的 ${ids.length} 首` : '当前筛选'
+      setQueue(ids, false, name)
       if (skipped > 0) onNotify('ok', `已跳过 ${skipped} 首未关联音频的卡片`)
-      if (play) void startPlayback(ids, ids[0], (m) => onNotify('err', m))
+      // 「播放全部 / 播放选中的 N 首」是明确要求从第一首开始放（队列已由上面写入）
+      if (play) void startPlayback(ids, ids[0], (m) => onNotify('err', m), { restart: true, name })
       return ids
     },
     [selectedPlayable, playable, items, selected.size, onNotify],
@@ -311,7 +406,8 @@ export function LibraryPage({
           ? playable
           : items.filter((s) => Boolean(s.audio))
       const ids = source.map((s) => s.id)
-      void startPlayback(ids, cardId, (m) => onNotify('err', m))
+      const name = selectedPlayable.length ? `选中的 ${ids.length} 首` : '当前筛选'
+      void startPlayback(ids, cardId, (m) => onNotify('err', m), { name })
     },
     [player, selectedPlayable, playable, items, onNotify],
   )
@@ -348,6 +444,25 @@ export function LibraryPage({
   }, [])
 
   const allSelected = filtered.length > 0 && filtered.every((s) => selected.has(s.id))
+  const pageSelected = pageItems.length > 0 && pageItems.every((s) => selected.has(s.id))
+
+  /**
+   * 勾/取消**当前页**。
+   *
+   * 分页之后，"全选"如果跨页选中了看不见的卡片，用户点「删除」就会删掉自己没看见的东西。
+   * 所以只作用于这一页；想一次选全部，得显式再点一下「选中全部 N 张」。
+   */
+  const togglePageSelection = useCallback(() => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      const all = pageItems.length > 0 && pageItems.every((s) => next.has(s.id))
+      for (const s of pageItems) {
+        if (all) next.delete(s.id)
+        else next.add(s.id)
+      }
+      return next
+    })
+  }, [pageItems])
   const selectedSnapshots = useMemo(
     () => items.filter((s) => selected.has(s.id)),
     [items, selected],
@@ -440,6 +555,76 @@ export function LibraryPage({
     <div className="flex flex-1 overflow-hidden">
       <div className="flex min-w-0 flex-1 flex-col">
         {/* 工具条 */}
+        {toolsCollapsed ? (
+          /*
+            收起态：只剩一条窄条，整页留给卡片。
+            但**不留空**——筛选条件用一行字回显（否则"怎么只剩 3 张"会变成谜），
+            勾选卡片后的批量操作照旧露出来（不然勾了却删不掉，只能又去展开）。
+          */
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-ink-200/60 bg-white/70 px-4 py-1.5 backdrop-blur md:px-6">
+            <button
+              onClick={() => setToolsCollapsed(false)}
+              aria-label="展开工具条"
+              title="展开工具条（搜索、筛选、排序、备份…）"
+              className="flex items-center gap-1 rounded-md border border-ink-200 bg-white px-2 py-1 text-[11px] text-ink-600 transition hover:border-ink-400 hover:text-ink-900"
+            >
+              <ChevronDown className="h-3.5 w-3.5" />
+              工具条
+            </button>
+            <span className="min-w-0 truncate text-[11px] text-ink-400">
+              {keywords.length > 0 || activePreset || activePlaylist
+                ? `${filtered.length} / ${items.length} 张`
+                : `${items.length} 张`}
+              {playableCount > 0 && ` · ${playableCount} 首有音频`}
+              {pageCount > 1 && ` · 第 ${page}/${pageCount} 页`}
+              {keywords.length > 0 &&
+                ` · 搜索「${query.trim().slice(0, 16)}${query.trim().length > 16 ? '…' : ''}」`}
+              {activePreset && ` · 预设「${activePreset.name}」`}
+              {activePlaylist && ` · 歌单「${activePlaylist.name}」`}
+            </span>
+
+            {selected.size > 0 && (
+              <>
+                <span className="ml-auto text-[11px] text-ink-500">已选 {selected.size} 项</span>
+                <button
+                  onClick={() => void handleExportZip()}
+                  disabled={progress !== null}
+                  className="flex items-center gap-1 rounded-md bg-ink-800 px-2 py-1 text-[11px] font-medium text-white transition hover:bg-ink-900 disabled:opacity-40"
+                >
+                  <FileArchive className="h-3 w-3" />
+                  导出 ZIP
+                </button>
+                <button
+                  onClick={() => setBatchTagOpen(true)}
+                  className="flex items-center gap-1 rounded-md border border-ink-200 bg-white px-2 py-1 text-[11px] text-ink-600 transition hover:border-ink-400 hover:text-ink-900"
+                >
+                  <Tags className="h-3 w-3" />
+                  加标签
+                </button>
+                <button
+                  onClick={() => void handleDeleteSelected()}
+                  className="flex items-center gap-1 rounded-md border border-ink-200 bg-white px-2 py-1 text-[11px] text-ink-600 transition hover:border-red-300 hover:text-red-600"
+                >
+                  <Trash2 className="h-3 w-3" />
+                  删除
+                </button>
+                <button
+                  onClick={() => setSelected(new Set())}
+                  className="rounded-md px-2 py-1 text-[11px] text-ink-400 transition hover:text-ink-700"
+                >
+                  取消选择
+                </button>
+              </>
+            )}
+
+            {snapshots.thumbFix && (
+              <span className={`${selected.size > 0 ? '' : 'ml-auto '}flex items-center gap-1.5 text-[11px] text-ink-400`}>
+                <Loader2 className="h-3 w-3 animate-spin" />
+                补缩略图 {snapshots.thumbFix.done}/{snapshots.thumbFix.total}
+              </span>
+            )}
+          </div>
+        ) : (
         <div className="flex flex-col gap-3 border-b border-ink-200/60 bg-white/70 px-4 py-3 backdrop-blur md:px-6">
           <div className="flex flex-wrap items-center gap-2">
             {/* 相对定位只是为了让「?」按钮挨着搜索框；面板本身走 portal 挂到 body，
@@ -544,6 +729,17 @@ export function LibraryPage({
                 <List className="h-3.5 w-3.5" />
               </button>
             </div>
+
+            {/* 收起工具条：把整页留给卡片（会记住，下次进来还是收起的） */}
+            <button
+              onClick={() => setToolsCollapsed(true)}
+              aria-label="收起工具条"
+              title="收起工具条，把整页留给卡片"
+              className="flex items-center gap-1 rounded-full border border-ink-200 bg-white px-2.5 py-1.5 text-xs text-ink-600 transition hover:border-ink-400 hover:text-ink-900"
+            >
+              <ChevronUp className="h-3.5 w-3.5" />
+              收起
+            </button>
           </div>
 
           {/*
@@ -557,15 +753,39 @@ export function LibraryPage({
               <>
                 <button
                   onClick={() =>
-                    allSelected
-                      ? setSelected(new Set())
-                      : setSelected(new Set(filtered.map((s) => s.id)))
+                    pageCount > 1
+                      ? togglePageSelection()
+                      : allSelected
+                        ? setSelected(new Set())
+                        : setSelected(new Set(filtered.map((s) => s.id)))
                   }
+                  title={pageCount > 1 ? '只勾选当前这一页（避免删掉没看见的卡片）' : undefined}
                   className="flex items-center gap-1.5 rounded-md border border-ink-200 bg-white px-2.5 py-1.5 text-xs text-ink-600 transition hover:border-ink-300 hover:text-ink-800"
                 >
-                  {allSelected ? <CheckSquare className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
-                  {allSelected ? '取消全选' : '全选'}
+                  {(pageCount > 1 ? pageSelected : allSelected) ? (
+                    <CheckSquare className="h-3.5 w-3.5" />
+                  ) : (
+                    <Square className="h-3.5 w-3.5" />
+                  )}
+                  {pageCount > 1
+                    ? pageSelected
+                      ? '取消本页'
+                      : '全选本页'
+                    : allSelected
+                      ? '取消全选'
+                      : '全选'}
                 </button>
+
+                {/* 分页之后"全选"只作用于本页，跨页选全部得显式点一次（不然容易误删） */}
+                {pageCount > 1 && !allSelected && (
+                  <button
+                    onClick={() => setSelected(new Set(filtered.map((s) => s.id)))}
+                    title={`选中全部 ${filtered.length} 张（含其他页）`}
+                    className="rounded-md px-2 py-1.5 text-xs text-ink-500 underline decoration-dotted transition hover:text-ink-800"
+                  >
+                    选中全部 {filtered.length} 张
+                  </button>
+                )}
 
                 {/*
                   全局播放键：常驻在「全选」右边（不是选中后才冒出来），位置稳定才被发现。
@@ -616,9 +836,17 @@ export function LibraryPage({
             </>
             )}
 
+            {/* 补缩略图：老数据里的卡片没有缩略图，而列表不再下发配图，网格就靠它显示 */}
+            {snapshots.thumbFix && (
+              <span className="ml-auto flex items-center gap-1.5 text-[11px] text-ink-400">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                正在补缩略图 {snapshots.thumbFix.done}/{snapshots.thumbFix.total}
+              </span>
+            )}
+
             <button
               onClick={() => void refresh()}
-              className="ml-auto rounded-md px-2 py-1.5 text-xs text-ink-400 transition hover:text-ink-700"
+              className={`${snapshots.thumbFix ? '' : 'ml-auto '}rounded-md px-2 py-1.5 text-xs text-ink-400 transition hover:text-ink-700`}
             >
               刷新
             </button>
@@ -749,6 +977,24 @@ export function LibraryPage({
                         {dead > 0 && <span className="text-amber-600">/{p.cardIds.length}</span>}
                       </span>
                     </button>
+                    {/* 只看这个歌单里的卡片（再点一次取消）：和搜索/预设是同一层的筛选口径 */}
+                    <button
+                      onClick={() => setActivePlaylistId((prev) => (prev === p.id ? null : p.id))}
+                      aria-label={`筛选歌单 ${p.name}`}
+                      aria-pressed={activePlaylistId === p.id}
+                      title={
+                        activePlaylistId === p.id
+                          ? `取消筛选，显示全部卡片`
+                          : `只看「${p.name}」里的卡片`
+                      }
+                      className={`flex h-full items-center border-l border-ink-100 px-1.5 transition ${
+                        activePlaylistId === p.id
+                          ? 'bg-ink-800 text-white'
+                          : 'text-ink-400 hover:text-ink-800'
+                      }`}
+                    >
+                      <Filter className="h-3 w-3" />
+                    </button>
                     <button
                       onClick={() => {
                         if (window.confirm(`删除歌单「${p.name}」？卡片不会被删除。`)) onDeletePlaylist?.(p.id)
@@ -769,6 +1015,7 @@ export function LibraryPage({
           {(keywords.length > 1 ||
             missedKeywords.length > 0 ||
             activePreset ||
+            activePlaylist ||
             parsed.unknownFields.length > 0 ||
             // 单个精确条件也要回显：用户得能确认「作者：李白」真的被当成字段限定解析了
             keywords.some((t) => t.field)) && (
@@ -818,13 +1065,23 @@ export function LibraryPage({
                   <X className="h-2.5 w-2.5" />
                 </button>
               )}
+              {activePlaylist && (
+                <button
+                  onClick={() => setActivePlaylistId(null)}
+                  title="取消歌单筛选，显示全部卡片"
+                  className="flex items-center gap-1 rounded-full bg-ink-100 px-2 py-0.5 text-ink-600 transition hover:bg-ink-200 hover:text-ink-900"
+                >
+                  歌单「{activePlaylist.name}」生效中
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              )}
               {missedKeywords.length > 0 && (
                 <span className="text-amber-600">
                   未找到：
                   {missedKeywords.join('、')}
                 </span>
               )}
-              {(keywords.length > 0 || activePreset) && (
+              {(keywords.length > 0 || activePreset || activePlaylist) && (
                 <button
                   onClick={clearFilters}
                   className="rounded-full border border-ink-200 px-2 py-0.5 text-ink-500 transition hover:border-ink-400 hover:text-ink-800"
@@ -835,9 +1092,10 @@ export function LibraryPage({
             </p>
           )}
         </div>
+        )}
 
         {/* 列表 */}
-        <div className="canvas-bg flex-1 overflow-y-auto p-4 md:p-6">
+        <div ref={listRef} className="canvas-bg flex-1 overflow-y-auto p-4 md:p-6">
           {loading ? (
             <p className="py-16 text-center text-sm text-ink-400">读取中…</p>
           ) : items.length === 0 ? (
@@ -861,7 +1119,7 @@ export function LibraryPage({
             </p>
           ) : view === 'grid' ? (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-              {filtered.map((s) => (
+              {pageItems.map((s) => (
                 <LibraryCard
                   key={s.id}
                   snapshot={s}
@@ -894,7 +1152,7 @@ export function LibraryPage({
             </div>
           ) : (
             <ul className="mx-auto flex max-w-3xl flex-col gap-1.5">
-              {filtered.map((s) => (
+              {pageItems.map((s) => (
                 <ListRow
                   key={s.id}
                   snapshot={s}
@@ -917,6 +1175,57 @@ export function LibraryPage({
             </ul>
           )}
         </div>
+
+        {/*
+          分页条。只在**真的有多页**时出现：一页装得下的时候多一条栏纯属占地方
+          （上一个需求刚把版面让给卡片，不能再自己吃回去）。
+        */}
+        {pageCount > 1 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-ink-200/60 bg-white/70 px-4 py-2 backdrop-blur md:px-6">
+            <span className="text-[11px] text-ink-400">
+              第 {page} / {pageCount} 页 · 共 {filtered.length} 张（每页 {PAGE_SIZE} 张）
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1}
+                aria-label="上一页"
+                className="rounded-md border border-ink-200 bg-white px-2 py-1 text-[11px] text-ink-600 transition hover:border-ink-400 hover:text-ink-900 disabled:opacity-40"
+              >
+                上一页
+              </button>
+              {pageNumbers(page, pageCount).map((n, i) =>
+                n === '…' ? (
+                  <span key={`gap${i}`} className="px-1 text-[11px] text-ink-300">
+                    …
+                  </span>
+                ) : (
+                  <button
+                    key={n}
+                    onClick={() => setPage(n)}
+                    aria-label={`第 ${n} 页`}
+                    aria-current={n === page ? 'page' : undefined}
+                    className={`min-w-[1.75rem] rounded-md border px-1.5 py-1 text-[11px] tabular-nums transition ${
+                      n === page
+                        ? 'border-ink-800 bg-ink-800 text-white'
+                        : 'border-ink-200 bg-white text-ink-600 hover:border-ink-400 hover:text-ink-900'
+                    }`}
+                  >
+                    {n}
+                  </button>
+                ),
+              )}
+              <button
+                onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+                disabled={page >= pageCount}
+                aria-label="下一页"
+                className="rounded-md border border-ink-200 bg-white px-2 py-1 text-[11px] text-ink-600 transition hover:border-ink-400 hover:text-ink-900 disabled:opacity-40"
+              >
+                下一页
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 备份与恢复 */}
@@ -1043,8 +1352,13 @@ function ListRow({
   const audioState = audioStateOf(snapshot.audio)
   const theme = poetryThemes[Math.min(Math.max(s.themeIndex, 0), poetryThemes.length - 1)]
   const sizeLabel = SIZE_OPTIONS.find((o) => o.value === s.size)?.label ?? s.size
+  // 与网格里的卡片同一套提示：正在播 → 流动光圈；暂停但仍装载 → 不动的暖光
+  const player = useAudioPlayer()
+  const playing = isPlayingId(player, snapshot.id)
+  const loaded = !playing && player.currentId === snapshot.id
   return (
-    <li
+    <li className={`relative rounded-[10px] p-[2px] ${playing ? 'playing-frame' : loaded ? 'playing-frame-idle' : ''}`}>
+    <div
       className={`group flex items-center gap-3 rounded-lg border bg-white px-2.5 py-2 transition ${
         selected ? 'border-ink-800' : AUDIO_STATE_BORDER[audioState]
       }`}
@@ -1116,6 +1430,7 @@ function ListRow({
           <Trash2 className="h-3.5 w-3.5" />
         </button>
       </span>
+    </div>
     </li>
   )
 }

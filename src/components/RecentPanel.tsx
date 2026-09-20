@@ -105,8 +105,10 @@ export function RecentPanel({ open, onClose, snapshots, onRestore, onOpenLibrary
                   <span
                     className="h-12 w-12 shrink-0 overflow-hidden rounded-md border border-ink-200 bg-cover bg-center"
                     style={{
-                      backgroundImage: s.state.background
-                        ? `url("${s.state.background.dataUrl}")`
+                      // 48px 的预览用缩略图就够：列表不带配图，原图要单独请求，
+                      // 为了一个小方块去拉 2MB 不划算
+                      backgroundImage: s.thumb
+                        ? `url("${s.thumb}")`
                         : themeBackgroundOf(s.style, s.state.themeIndex),
                     }}
                   />

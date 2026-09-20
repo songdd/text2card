@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react'
+import { normalizeInk } from './ink'
 
 /**
  * 歌词**显示**偏好。
@@ -29,6 +30,19 @@ export interface MiniPos {
   x: number
   y: number
 }
+
+/** 小窗尺寸。null = 默认大小（宽度固定 21rem、高度跟着内容走） */
+export interface MiniSize {
+  w: number
+  h: number
+}
+
+/** 小窗缩放的下限：再小就放不下标题栏 + 三行歌词了 */
+export const MINI_MIN_W = 200
+export const MINI_MIN_H = 120
+/** 上限只做兜底（真正的边界是视口） */
+export const MINI_MAX_W = 1600
+export const MINI_MAX_H = 1200
 
 /** 小窗透明度下限：再低字就浮在内容上看不清了 */
 export const MINI_OPACITY_MIN = 0.2
@@ -68,10 +82,16 @@ export interface LyricPrefs {
   panel: LyricPanel
   /** 小窗被拖到哪儿了（null = 默认右下角；视口缩小后会重新夹回屏内） */
   miniPos: MiniPos | null
+  /** 小窗被拉到多大了（null = 默认：宽 21rem、高度跟着内容走） */
+  miniSize: MiniSize | null
   /** 小窗底色透明度：越低越像"浮在内容上的字幕"，越高越像一块纸 */
   miniOpacity: number
   /** 小窗是否描边（默认不描边：它只是浮在内容上的一层歌词，不该像一扇窗） */
   miniBorder: boolean
+  /** 当前句颜色（hex）。null = 用歌词本来的墨色 */
+  inkActive: string | null
+  /** 其他句颜色（hex）。null = 用歌词本来的浅墨色 */
+  inkIdle: string | null
   /** 播放条里是否滚动显示当前句（不打断手上的活就能看到唱到哪） */
   showBarLine: boolean
   /** 歌词页是否铺上这张卡片自己的背景（AI 配图 / 主题纸底） */
@@ -98,14 +118,29 @@ function readOpacity(raw: unknown): number {
   return Math.round(clamped * 100) / 100
 }
 
+/** 尺寸同样要验并夹进合法区间：写坏的值会让小窗要么看不见、要么盖满整屏 */
+function readSize(raw: unknown): MiniSize | null {
+  if (!raw || typeof raw !== 'object') return null
+  const { w, h } = raw as Partial<MiniSize>
+  if (typeof w !== 'number' || typeof h !== 'number') return null
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return null
+  return {
+    w: Math.round(Math.min(MINI_MAX_W, Math.max(MINI_MIN_W, w))),
+    h: Math.round(Math.min(MINI_MAX_H, Math.max(MINI_MIN_H, h))),
+  }
+}
+
 function load(): LyricPrefs {
   const fallback: LyricPrefs = {
     style: 'center',
     fontScale: 'md',
     panel: 'full',
     miniPos: null,
+    miniSize: null,
     miniOpacity: MINI_OPACITY_DEFAULT,
     miniBorder: false,
+    inkActive: null,
+    inkIdle: null,
     showBarLine: true,
     showBackground: true,
   }
@@ -119,8 +154,12 @@ function load(): LyricPrefs {
         data.fontScale && data.fontScale in LYRIC_FONT_FACTOR ? data.fontScale : fallback.fontScale,
       panel: PANELS.includes(data.panel as LyricPanel) ? (data.panel as LyricPanel) : fallback.panel,
       miniPos: readPos(data.miniPos),
+      miniSize: readSize(data.miniSize),
       miniOpacity: readOpacity(data.miniOpacity),
       miniBorder: data.miniBorder === true,
+      // 颜色只放行合法 hex（它们会被直接塞进 style.color）
+      inkActive: normalizeInk(data.inkActive) ?? null,
+      inkIdle: normalizeInk(data.inkIdle) ?? null,
       showBarLine: data.showBarLine !== false,
       showBackground: data.showBackground !== false,
     }

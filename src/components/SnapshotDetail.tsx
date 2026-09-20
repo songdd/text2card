@@ -17,9 +17,9 @@ import { SCENE_FIELD_META, filledCount } from '../../shared/scene'
 import { fontLabelOf, isFontKey } from '../lib/fonts'
 import { normalizeTags } from '../lib/tags'
 import { formatBytes, formatDuration, timeAgo } from '../lib/format'
-import { dataUrlBytes } from '../lib/thumb'
+import { useCardBackground } from '../lib/useBackground'
 import { isPlayingId, togglePlay, useAudioPlayer } from '../lib/audioPlayer'
-import type { Snapshot } from '../lib/snapshots'
+import { backgroundBytesOf, type Snapshot } from '../lib/snapshots'
 
 /**
  * 详情灯箱。
@@ -50,7 +50,11 @@ export function SnapshotDetail({
   /** 音频播放出错时的提示出口 */
   onNotify?: (kind: 'ok' | 'err', message: string) => void
 }) {
-  const s = snapshot.state
+  // 配图按需取回：列表里只有缩略图，详情要的是完整画质。
+  // 取回之前先用缩略图顶着（放大会有点软，读作"正在对焦"），所以这里不会白一下。
+  const { background, placeholder, loading: bgLoading } = useCardBackground(snapshot)
+  const bg = background ?? placeholder
+  const s: Snapshot['state'] = { ...snapshot.state, background: bg ?? null }
   const holderRef = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
   const [showMeta, setShowMeta] = useState(false)
@@ -79,7 +83,7 @@ export function SnapshotDetail({
 
   const theme = poetryThemes[Math.min(Math.max(s.themeIndex, 0), poetryThemes.length - 1)]
   const sizeLabel = SIZE_OPTIONS.find((o) => o.value === s.size)?.label ?? s.size
-  const bgBytes = dataUrlBytes(s.background?.dataUrl)
+  const bgBytes = backgroundBytesOf(s)
 
   return (
     <div
@@ -181,7 +185,9 @@ export function SnapshotDetail({
               </Row>
               <Row label="背景">
                 {s.background
-                  ? `AI 配图 · 蒙层 ${Math.round(s.background.scrim * 100)}% · 约 ${formatBytes(bgBytes)}`
+                  ? `AI 配图 · 蒙层 ${Math.round(s.background.scrim * 100)}% · 约 ${formatBytes(bgBytes)}${
+                      bgLoading ? '（正在读取原图…）' : ''
+                    }`
                   : '无（主题渐变）'}
               </Row>
               <Row label="标签">

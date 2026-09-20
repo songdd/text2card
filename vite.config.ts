@@ -84,6 +84,19 @@ function libraryApi(): Plugin {
         return lib
       }
 
+      // 启动自检：说清数据在哪、用的是哪个数据库引擎。node:sqlite 是 Node 内置的，
+      // 但从 23.4 起才不需要实验开关——版本不够时给出人话，而不是一句模块找不到。
+      const [major, minor] = process.versions.node.split('.').map(Number)
+      if (major < 23 || (major === 23 && minor < 4)) {
+        server.config.logger.warn(
+          `Node ${process.versions.node} 太旧：数据层用的 node:sqlite 需要 23.4+，请升级 Node`,
+        )
+      } else {
+        server.config.logger.info(
+          `  诗词库：data/library.sqlite（node:sqlite，Node ${process.versions.node} 内置）+ data/audio/ + data/images/`,
+        )
+      }
+
       server.middlewares.use('/api/library', (req, res, next) => {
         void (async () => {
           // 只接管 /api/library/*；根路径交给后面的中间件（Vite 自己）

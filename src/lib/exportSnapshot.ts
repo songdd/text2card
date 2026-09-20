@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { SnapshotCard } from '../components/SnapshotCard'
 import { renderPngCanvas } from './exporter'
 import { buildZip, safeZipName, type ZipEntry } from './zip'
-import type { Snapshot, SnapshotState } from './snapshots'
+import { withLoadedBackground, type Snapshot, type SnapshotState } from './snapshots'
 
 /**
  * 离屏渲染任意一条快照，并导出为 PNG。
@@ -68,16 +68,19 @@ export function pngFilename(snapshot: Snapshot): string {
   return safeZipName(`${base}.png`, used)
 }
 
-/** 导出单张 PNG */
+/** 导出单张 PNG。列表里的快照不带配图，先按需取回再渲染 */
 export async function exportSnapshotPng(snapshot: Snapshot): Promise<void> {
-  const blob = await snapshotToBlob(snapshot.state)
+  const full = await withLoadedBackground(snapshot)
+  const blob = await snapshotToBlob(full.state)
   downloadBlob(blob, pngFilename(snapshot))
 }
 
 /** 导出该条快照的原始 AI 背景图（素材复用）；没有背景图时抛错 */
 export async function exportSnapshotBackground(snapshot: Snapshot): Promise<void> {
-  const dataUrl = snapshot.state.background?.dataUrl
-  if (!dataUrl) throw new Error('这条卡片没有 AI 背景图')
+  if (!snapshot.state.background) throw new Error('这条卡片没有 AI 背景图')
+  const full = await withLoadedBackground(snapshot)
+  const dataUrl = full.state.background?.dataUrl
+  if (!dataUrl) throw new Error('配图读取失败')
   const res = await fetch(dataUrl)
   const blob = await res.blob()
   const ext = blob.type.includes('png') ? 'png' : blob.type.includes('webp') ? 'webp' : 'jpg'
@@ -128,7 +131,9 @@ export async function exportSnapshotsZip(
   for (const snapshot of snapshots) {
     if (signal?.aborted) throw new DOMException('已取消', 'AbortError')
     onProgress?.({ done, total: snapshots.length, current: snapshot.label, bytes })
-    const blob = await snapshotToBlob(snapshot.state)
+    // 列表里的快照不带配图，逐张按需取回——不取的话导出的就是没有背景的卡片
+    const full = await withLoadedBackground(snapshot)
+    const blob = await snapshotToBlob(full.state)
     const buf = new Uint8Array(await blob.arrayBuffer())
     bytes += buf.length
     entries.push({ name: safeZipName(`${snapshot.label || '奕霖古诗词'}.png`, used), data: buf })

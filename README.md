@@ -56,14 +56,26 @@
 
 ## 运行
 
-要求 Node.js ≥ 18（Vite 5 的最低要求），macOS / Windows / Linux 均可。
+要求 **Node.js ≥ 23.4**（数据层用 Node 内置的 `node:sqlite`，23.4 起才不需要实验开关），
+macOS / Windows / Linux 均可。
 
 ```bash
 npm install
-npm run dev
+npm run app      # 起本地服务 + 自动打开浏览器（推荐）
 ```
 
-浏览器打开 <http://localhost:5173/>。导出 PNG 建议使用 Chrome / Edge 等
+Windows 上还可以直接双击项目根目录的 **`startup.cmd`**，效果一样。
+
+也可以只用 `npm run dev` 起服务，再自己打开 <http://localhost:5173/>。
+
+**为什么必须有个本地服务**：卡片、音频、配图、字幕都存在项目里的 `data/` 目录
+（一个 `library.sqlite` + `audio/` + `images/`），由本机 Node 服务提供。所以纯静态托管
+（比如 Cloudflare Pages）只能看到界面，看不到自己的库——界面上会明确提示这一点，
+而不是显示一个空库。
+
+服务起来后终端会打印两个地址：本机地址，以及**同一 WiFi 下手机/平板可访问的局域网地址**。
+
+导出 PNG 建议使用 Chrome / Edge 等
 Chromium 系浏览器——html-to-image 的 DOM→SVG→canvas 渲染路径在 Safari
 上有已知 bug（字体丢失、图像空白）。
 
@@ -73,6 +85,23 @@ Chromium 系浏览器——html-to-image 的 DOM→SVG→canvas 渲染路径在 
 npm run build
 npm run preview
 ```
+
+### 数据在磁盘上长什么样
+
+```
+data/
+  library.sqlite     卡片元信息、标签、墨色、歌单、预设（几百 KB，不含图片音频本体）
+  audio/<卡片id>.<ext>   音频原文件，可以直接用别的播放器打开
+  images/<卡片id>.<ext>  AI 配图原图（草稿配图是 draft.<ext>）
+```
+
+**体积大的东西一律不进数据库**：一张 AI 配图 1–3MB、内联成 base64 还会再胖 1/3，
+塞进 SQLite 行里会让每次读一张卡片都要解析几 MB 的 JSON、改一个字也要重写整行。
+所以库里只留 `{ scrim, bytes, ext }`，图在 `images/` 下按卡片 id 命名；
+管理页列表只下发 240px 缩略图，要看大图／导出／备份时才按需取原图。
+
+整个 `data/` 目录可以直接拷走、也可以只备份 `library.sqlite`+两个文件夹（界面上
+「备份」导出的 ZIP 就是这三样）。
 
 ---
 

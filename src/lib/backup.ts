@@ -11,6 +11,7 @@ import {
   putTagPreset,
   restoreAudio,
   snapshotKeyOf,
+  withLoadedBackground,
   type Playlist,
   type Snapshot,
   type TagPreset,
@@ -119,29 +120,32 @@ export async function exportBackup(onProgress?: (p: ExportProgress) => void): Pr
   let done = 0
 
   for (const card of cards) {
+    // 列表接口不下发配图（dataUrl 为空、只有体积），打包前按需取回。
+    // 少了这一步，备份会**安静地丢掉所有配图**——这是最不能出错的地方。
+    const full = card.state.background && !card.state.background.dataUrl ? await withLoadedBackground(card) : card
     const record: Snapshot = {
-      ...card,
+      ...full,
       // 缩略图不导出：能从配图重新生成
       thumb: undefined,
-      state: { ...card.state },
+      state: { ...full.state },
     }
     const item: BackupCard = { record }
 
     // 配图
-    const dataUrl = card.state.background?.dataUrl
+    const dataUrl = full.state.background?.dataUrl
     if (dataUrl) {
       const decoded = dataUrlToBytes(dataUrl)
       if (decoded) {
         const ext = MIME_EXT[decoded.mime] ?? 'jpg'
-        const path = `images/${card.id}.${ext}`
+        const path = `images/${full.id}.${ext}`
         entries.push({ name: path, data: decoded.bytes })
         // 记录里把图掏空，避免同一张图在 JSON 里再 base64 一遍
-        record.state = { ...record.state, background: { ...card.state.background!, dataUrl: '' } }
+        record.state = { ...record.state, background: { ...full.state.background!, dataUrl: '' } }
         item.image = path
         counts.images++
       } else {
         // 解不出来就原样留在 JSON 里，宁可包大一点也不能丢数据
-        record.state = { ...record.state, background: card.state.background }
+        record.state = { ...record.state, background: full.state.background }
       }
     }
 

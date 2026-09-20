@@ -4,6 +4,7 @@ import { ScaledCard } from './ScaledCard'
 import { PlayerButton } from './PlayerButton'
 import { CardTagPopover, TagChip } from './TagPicker'
 import { normalizeTags } from '../lib/tags'
+import { isPlayingId, useAudioPlayer } from '../lib/audioPlayer'
 import { AUDIO_STATE_BORDER, AUDIO_STATE_BUTTON, AUDIO_STATE_DOT, AUDIO_STATE_LABEL, audioStateOf } from '../lib/audioState'
 import type { Snapshot, SnapshotState } from '../lib/snapshots'
 
@@ -66,6 +67,10 @@ export function LibraryCard({
   const s = snapshot.state
   const tags = normalizeTags(s.tags)
   const audioState = audioStateOf(snapshot.audio)
+  // 播放状态：正在播的那张套一圈流光，暂停但仍装载的那张套一圈不动的暖光
+  const player = useAudioPlayer()
+  const playing = isPlayingId(player, snapshot.id)
+  const loaded = !playing && player.currentId === snapshot.id
   const boxRef = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
 
@@ -94,6 +99,16 @@ export function LibraryCard({
   }, [s, snapshot.thumb])
 
   return (
+    <div
+      /**
+       * 光圈包在卡片外面（2px 的 padding 里填渐变）：正在播时是流动的彩色光，
+       * 暂停但还装载着这张时是不动的暖光。padding 常驻，所以播放开始/结束**不会
+       * 让卡片挪位置**（那会像页面在抖）。
+       */
+      className={`relative rounded-[10px] p-[2px] ${
+        playing ? 'playing-frame' : loaded ? 'playing-frame-idle' : ''
+      }`}
+    >
     <div
       /**
        * 注意这里**没有** `overflow-hidden`：快速加标签的弹层要能溢出到卡片外面，
@@ -219,6 +234,7 @@ export function LibraryCard({
           onClose={onCloseTag}
         />
       )}
+    </div>
     </div>
   )
 }

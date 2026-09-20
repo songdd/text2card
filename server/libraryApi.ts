@@ -5,16 +5,20 @@ import {
   deleteCard,
   deleteKv,
   getCard,
+  inlineBackground,
   listCards,
   listKv,
   putCard,
   putKv,
   readAudio,
+  readDraftBackground,
   stats,
   writeAudio,
+  writeDraftBackground,
   type LibraryHandle,
   type SnapshotRecord,
 } from './libraryDb'
+import { dataUrlBytes } from '../shared/scene'
 
 /**
  * 本地诗词库的 HTTP 接口。
@@ -25,10 +29,10 @@ import {
  *
  * 路由一览：
  *   GET    /status                     库状态（路径、卡片数、音频文件数与体积）
- *   GET    /cards                      全部卡片
- *   GET    /cards/:id                  单张
+ *   GET    /cards                      全部卡片（**配图只给体积，不给图**，见 slimCard）
+ *   GET    /cards/:id                  单张（含完整配图，按需取图就走它）
  *   PUT    /cards/:id                  写入/覆盖（body 是完整卡片）
- *   PATCH  /cards/:id                  局部更新（tags / audio；audio 里传 null = 删除该键）
+ *   PATCH  /cards/:id                  局部更新（tags / audio / thumb；audio 里传 null = 删除该键）
  *   DELETE /cards/:id                  删除（连带音频文件）
  *   POST   /cards/clear                清空全部
  *   POST   /cards/add-tags             批量加标签 { ids, add }
@@ -90,6 +94,60 @@ function segments(path: string): string[] {
   return path.split('/').filter(Boolean).map(decodeURIComponent)
 }
 
+/**
+ * 列表用的是**瘦身版**卡片：配图本身（一张 1–3MB）**存在 data/images/ 的文件里**，
+ * 行里只有 `{ scrim, bytes, ext }`，列表也只下发这个体积数字。
+ *
+ * 为什么：列表页只画 240px 的缩略图（`thumb`），把整库配图一起返回的话，8 张卡片
+ * 一次就是 13MB 打底、几十张就上百 MB——每开一次管理页都要搬一遍、解析一遍。
+ * 要看大图／导出／备份时再按需 `GET /cards/:id` 取整张（那时服务端才去读文件）。
+ *
+ * 空 `dataUrl` + 有 `bytes` = 这张卡有配图，图在文件里。前端据此判断"有配图"，
+ * 所以这个形状是接口契约的一部分，不要改成把 `background` 直接抹掉。
+ */
+function slimCard(card: SnapshotRecord): SnapshotRecord {
+  const bg = card.state?.background as { dataUrl?: string; scrim?: number; bytes?: number; ext?: string } | null | undefined
+  if (!bg) return card
+  // 正常情况库里本来就没有内联图；这里只是兜一道：万一有（迁移失败的行），
+  // 也不能让它随列表发出去
+  if (!bg.dataUrl) return card
+  return {
+    ...card,
+    state: { ...card.state, background: { scrim: bg.scrim, dataUrl: '', bytes: dataUrlBytes(bg.dataUrl) } },
+  }
+}
+
+/**
+ * 写入时保住已有配图。
+ *
+ * 列表接口不下发配图，所以"从列表载入编辑页、这期间图还没取回来"是正常中间态——
+ * 此时 state 里的 dataUrl 是空的，直接存下去会把配图悄悄抹掉。空串一律当作
+ * "图没取回来"（文件还在 data/images/ 里），沿用原来那份元信息；真要删图是
+ * `background: null`，那条路照常生效（会连文件一起删）。
+ */
+function keepExistingBackground(existing: SnapshotRecord | null, next: SnapshotRecord): SnapshotRecord {
+  const after = next.state?.background as
+    | { dataUrl?: string; scrim?: number; bytes?: number; ext?: string }
+    | null
+    | undefined
+  if (!after) return next // 明确删图
+  if (after.dataUrl) return next // 带了图，putCard 会把它落成文件
+  const before = existing?.state?.background as { scrim?: number; bytes?: number; ext?: string } | null | undefined
+  if (!before?.bytes) return next // 本来就没图
+  return {
+    ...next,
+    state: {
+      ...next.state,
+      background: {
+        dataUrl: '',
+        scrim: after.scrim ?? before.scrim,
+        bytes: before.bytes,
+        ext: before.ext,
+      },
+    },
+  }
+}
+
 export function handleLibrary(req: ApiRequest, lib: LibraryHandle): ApiResponse {
   const parts = segments(req.path)
   const method = req.method.toUpperCase()
@@ -103,7 +161,7 @@ export function handleLibrary(req: ApiRequest, lib: LibraryHandle): ApiResponse 
   if (parts[0] === 'cards') {
     // /cards
     if (parts.length === 1) {
-      if (method === 'GET') return json(200, { cards: listCards(lib) })
+      if (method === 'GET') return json(200, { cards: listCards(lib).map(slimCard) })
       return json(405, { error: '请用 PUT /cards/:id 写入卡片' })
     }
 
@@ -142,14 +200,16 @@ export function handleLibrary(req: ApiRequest, lib: LibraryHandle): ApiResponse 
       const id = second
       if (method === 'GET') {
         const card = getCard(lib, id)
-        return card ? json(200, { card }) : json(404, { error: '卡片不存在' })
+        // 只有这一条路会把配图读出来内联成 data URL（详情/导出/备份走它）
+        return card ? json(200, { card: inlineBackground(lib, card) }) : json(404, { error: '卡片不存在' })
       }
       if (method === 'PUT') {
         const record = parseJsonBody<SnapshotRecord>(req)
         if (!record?.id) return json(400, { error: '缺少 id' })
         if (record.id !== id) return json(400, { error: 'id 与路径不一致' })
-        putCard(lib, record)
-        return ok({ card: record })
+        const stored = keepExistingBackground(getCard(lib, id), record)
+        putCard(lib, stored)
+        return ok({ card: stored })
       }
       if (method === 'PATCH') {
         const card = getCard(lib, id)
@@ -185,20 +245,59 @@ export function handleLibrary(req: ApiRequest, lib: LibraryHandle): ApiResponse 
   if (parts[0] === 'audio' && parts.length === 2) {
     const id = parts[1]
     if (method === 'GET') {
-      const found = readAudio(lib, id)
+      const meta = getCard(lib, id)?.audio as { type?: string; name?: string } | undefined
+      // 按元信息里的文件名直接定位，不再靠"扫目录里第一个匹配"——
+      // 否则刚写完新文件、旧文件还没删掉的那一瞬间可能读到旧的那条
+      const found = readAudio(lib, id, meta?.name)
       if (!found) return json(404, { error: '这条卡片没有音频文件' })
-      const meta = getCard(lib, id)?.audio as { type?: string } | undefined
       return { status: 200, bytes: found.bytes, contentType: meta?.type || 'application/octet-stream' }
     }
+    /**
+     * 上传音频**并同时落库**（一次请求完成关联）。
+     *
+     * 以前前端要打三次：读卡片 → 传文件 → 写元信息。HTTP 没有跨资源事务，第三步
+     * 一失败就留下一个"没有元信息的音频文件"——界面上看不见、只有扫目录才发现。
+     * 现在顺序是"先写新文件（不动旧文件）→ 再落库 → 最后删旧文件"：
+     * 中间任何一步失败都能退回去，不会丢用户已有的音频。
+     */
     if (method === 'PUT') {
       if (!req.body.length) return json(400, { error: '请求体为空' })
       // 客户端会先拦一道，这里再拦一道：服务端不能假设调用方守规矩
       if (req.body.length > MAX_AUDIO_BYTES) {
         return json(413, { error: `音频超过 ${Math.round(MAX_AUDIO_BYTES / 1024 / 1024)}MB 上限` })
       }
+      const card = getCard(lib, id)
+      if (!card) return json(404, { error: '卡片不存在，音频没有归属' })
       const name = req.query.get('name') || `${id}.bin`
-      const { size } = writeAudio(lib, id, name, req.body)
-      return ok({ file: name, size })
+      const durationRaw = req.query.get('duration')
+      const duration = durationRaw !== null && durationRaw !== '' ? Number(durationRaw) : undefined
+      const previous = (card.audio ?? null) as Record<string, unknown> | null
+      const previousFile = typeof previous?.name === 'string' ? previous.name : null
+
+      const written = writeAudio(lib, id, name, req.body)
+      const meta: Record<string, unknown> = {
+        // 合并旧元信息：歌词时间轴、偏移这些不属于文件本身，换文件时不该丢
+        ...(previous ?? {}),
+        name,
+        type: req.contentType && req.contentType !== 'application/octet-stream' ? req.contentType : (previous?.type ?? ''),
+        size: written.size,
+        updatedAt: Date.now(),
+      }
+      if (duration !== undefined && Number.isFinite(duration)) meta.duration = duration
+      else delete meta.duration // 换了文件，旧时长不再作数
+
+      try {
+        const next = putCard(lib, { ...card, audio: meta })
+        // 落库成功之后才清理旧文件：只保留这次写进去的那个文件名
+        deleteAudioFile(lib, id, [name])
+        return ok({ card: next, file: name, size: written.size })
+      } catch (err) {
+        // 落库失败：把刚写的新文件删掉，旧文件原封不动 —— 用户手上的音频不受影响
+        deleteAudioFile(lib, id, previousFile ? [previousFile] : [])
+        return json(500, {
+          error: `音频已上传但元信息写入失败（原音频未受影响）：${err instanceof Error ? err.message : String(err)}`,
+        })
+      }
     }
     if (method === 'DELETE') {
       deleteAudioFile(lib, id)
@@ -213,7 +312,13 @@ export function handleLibrary(req: ApiRequest, lib: LibraryHandle): ApiResponse 
       return json(400, { error: `未知的小仓库：${store}` })
     }
     if (parts.length === 2) {
-      if (method === 'GET') return json(200, { items: listKv(lib, store) })
+      if (method === 'GET') {
+        // 草稿配图存在文件里，读的时候才补成 data URL（编辑器打开时要还原上一次那张图）
+        const items = listKv<{ id?: string }>(lib, store).map((item) =>
+          store === 'draft' && item?.id === 'background' ? (readDraftBackground(lib) as { id?: string }) : item,
+        )
+        return json(200, { items })
+      }
       return json(405, { error: '请用 PUT /kv/:store/:id' })
     }
     if (parts[2] === 'clear' && parts.length === 3 && method === 'POST') {
@@ -222,7 +327,12 @@ export function handleLibrary(req: ApiRequest, lib: LibraryHandle): ApiResponse 
     }
     const id = parts[2]
     if (method === 'PUT') {
-      putKv(lib, store, id, parseJsonBody<unknown>(req))
+      const body = parseJsonBody<unknown>(req)
+      if (store === 'draft' && id === 'background') {
+        writeDraftBackground(lib, body)
+        return ok({ id })
+      }
+      putKv(lib, store, id, body)
       return ok({ id })
     }
     if (method === 'DELETE') {

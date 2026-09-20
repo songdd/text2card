@@ -7,7 +7,9 @@ import {
   deleteSnapshot,
   labelOf,
   listSnapshots,
+  loadCardBackground,
   makeId,
+  putCardThumb,
   saveSnapshot,
   setAudioMeta,
   setSnapshotTags,
@@ -22,6 +24,8 @@ export interface SnapshotsState {
   /** 首次读取中 */
   loading: boolean
   saving: boolean
+  /** 正在补缩略图的进度（没有要补的就是 null） */
+  thumbFix: { done: number; total: number } | null
   refresh: () => Promise<void>
   save: (state: SnapshotState, style: Style) => Promise<void>
   remove: (id: string) => Promise<void>
@@ -67,6 +71,50 @@ export function useSnapshots({ onNotify }: Options = {}): SnapshotsState {
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  /**
+   * 补缩略图。
+   *
+   * 列表接口不下发配图，网格完全是靠 `thumb` 活着的——没有 thumb 的卡片就是一块
+   * 空白格（回落到主题底）。老数据里确实存在这种：缩略图是后来才加的功能，之前存
+   * 的卡片没有。所以这里做一次**自愈**：取回配图 → 在浏览器里缩成 240px →
+   * 只把缩略图写回（`PATCH thumb`，不动 state 里的配图）。
+   *
+   * 串行执行，一次一张：不跟用户正在看的详情页/正在跑的导出抢带宽，也不至于同时
+   * 解码好几张 2MB 的图把主线程堵住。补不上就跳过，那块依旧是主题底，不影响别的。
+   */
+  const fixingRef = useRef(false)
+  const fixedRef = useRef(new Set<string>())
+  const [thumbFix, setThumbFix] = useState<{ done: number; total: number } | null>(null)
+
+  useEffect(() => {
+    if (fixingRef.current) return
+    const missing = items.filter((s) => s.state.background && !s.thumb && !fixedRef.current.has(s.id))
+    if (!missing.length) return
+    fixingRef.current = true
+    setThumbFix({ done: 0, total: missing.length })
+    void (async () => {
+      let done = 0
+      for (const card of missing) {
+        fixedRef.current.add(card.id)
+        try {
+          const bg = await loadCardBackground(card)
+          const thumb = bg?.dataUrl ? await makeThumb(bg.dataUrl) : undefined
+          if (thumb) {
+            await putCardThumb(card.id, thumb)
+            // 只把这一张贴回列表：不整表重读，免得把用户的滚动位置和筛选抖一遍
+            setItems((prev) => prev.map((s) => (s.id === card.id ? { ...s, thumb } : s)))
+          }
+        } catch {
+          // 补不上就算了：那块还是主题底，其余功能不受影响
+        }
+        done++
+        setThumbFix({ done, total: missing.length })
+      }
+      fixingRef.current = false
+      setThumbFix(null)
+    })()
+  }, [items])
 
   const save = useCallback(
     async (state: SnapshotState, style: Style) => {
@@ -193,6 +241,7 @@ export function useSnapshots({ onNotify }: Options = {}): SnapshotsState {
     items,
     loading,
     saving,
+    thumbFix,
     refresh,
     save,
     remove,

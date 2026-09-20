@@ -112,7 +112,16 @@ export function PlayerBar({
         <span className="max-w-[7rem] truncate text-xs font-medium text-ink-800 md:max-w-[11rem]">
           {snapshot.label}
         </span>
-        {currentLine ? (
+        {/*
+          刷新回来被浏览器拦了自动播放：常驻一句"点 ▶ 继续"。
+          这里优先于当前句/作者——此刻用户最需要知道的是"为什么没在响、怎么响"，
+          而弹一条几秒就消失的提示等于没说。
+        */}
+        {player.resumeBlocked ? (
+          <span className="max-w-[9rem] truncate text-[11px] text-amber-600 md:max-w-[14rem]">
+            已恢复上次播放 · 点 ▶ 继续
+          </span>
+        ) : currentLine ? (
           <button
             onClick={onOpenLyrics}
             title="当前句 · 点开歌词页"
@@ -196,7 +205,11 @@ export function PlayerBar({
       <button
         onClick={onOpenQueue}
         aria-label="播放队列"
-        title={`播放队列（${prefs.queue.length} 首）`}
+        title={
+          prefs.queueName
+            ? `播放列表「${prefs.queueName}」· ${prefs.queue.length} 首（点开查看与排序）`
+            : `播放队列 · ${prefs.queue.length} 首（点开查看与排序）`
+        }
         className="flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] text-ink-600 transition hover:bg-ink-50 hover:text-ink-900"
       >
         <ListMusic className="h-3.5 w-3.5" />

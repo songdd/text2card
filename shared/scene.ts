@@ -151,6 +151,21 @@ export interface CardBackground {
   dataUrl: string
   /** 主题渐变在照片之上的不透明度（0–1），越大照片越淡、文字越清晰 */
   scrim: number
+  /**
+   * 图片字节数。
+   *
+   * 列表接口**不下发图片本身**（一张 1–3MB），只下发这个数字，所以"图还没取回来"
+   * 的时候界面照样能显示体积。空 `dataUrl` + 有 `bytes` 就是"这张卡有配图，图待取"。
+   */
+  bytes?: number
+}
+
+/** 粗略估算一条 data URL 的字节数（base64 解出来约 3/4）。服务端与前端共用这一份。 */
+export function dataUrlBytes(dataUrl: string | undefined): number {
+  if (!dataUrl) return 0
+  const comma = dataUrl.indexOf(',')
+  const body = comma >= 0 ? dataUrl.length - comma - 1 : dataUrl.length
+  return Math.round((body * 3) / 4)
 }
 
 /**

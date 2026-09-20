@@ -9,6 +9,7 @@ import {
   Pause,
   Play,
   Plus,
+  RotateCcw,
   Settings2,
   X,
 } from 'lucide-react'
@@ -21,6 +22,8 @@ import {
   LYRIC_PANEL_LABEL,
   LYRIC_STYLE_HINT,
   LYRIC_STYLE_LABEL,
+  MINI_MIN_H,
+  MINI_MIN_W,
   MINI_OPACITY_MIN,
   setLyricPrefs,
   useLyricPrefs,
@@ -30,6 +33,8 @@ import {
   type MiniPos,
 } from '../lib/lyricPrefs'
 import { formatDuration } from '../lib/format'
+import { InkRow } from './Controls'
+import { useCardBackground } from '../lib/useBackground'
 import { poetryThemes } from '../themes/poetryThemes'
 import type { Snapshot } from '../lib/snapshots'
 
@@ -47,6 +52,70 @@ import type { Snapshot } from '../lib/snapshots'
 
 /** 小窗离屏幕边缘的最小留白（也是拖动时的夹取边界） */
 const MINI_MARGIN = 4
+
+/** 小窗可拖拽缩放的八个方向 */
+const RESIZE_DIRS = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as const
+type ResizeDir = (typeof RESIZE_DIRS)[number]
+
+/**
+ * 每个方向的抓手放在哪、光标是什么。
+ *
+ * **一律排在面板内侧**，不做负偏移伸出边框：面板是 `overflow: hidden` + `rounded-xl`，
+ * 伸出去的部分会被裁掉，而裁剪后的那一带在命中测试里是"透明的"——点击会直接穿到
+ * 背后的页面（实测过：角上的抓手中心落在圆角外，`elementFromPoint` 命中的是管理页的网格）。
+ * 边条两端各留 12px 避开圆角，角上的方块取 16×16 让中心落在圆角内。
+ */
+const RESIZE_HANDLE: Record<ResizeDir, { pos: string; cursor: string }> = {
+  n: { pos: 'left-3 right-3 top-0 h-2', cursor: 'cursor-ns-resize' },
+  s: { pos: 'left-3 right-3 bottom-0 h-2', cursor: 'cursor-ns-resize' },
+  w: { pos: 'top-3 bottom-3 left-0 w-2', cursor: 'cursor-ew-resize' },
+  e: { pos: 'top-3 bottom-3 right-0 w-2', cursor: 'cursor-ew-resize' },
+  nw: { pos: 'left-0 top-0 h-4 w-4', cursor: 'cursor-nwse-resize' },
+  ne: { pos: 'right-0 top-0 h-4 w-4', cursor: 'cursor-nesw-resize' },
+  sw: { pos: 'left-0 bottom-0 h-4 w-4', cursor: 'cursor-nesw-resize' },
+  se: { pos: 'right-0 bottom-0 h-4 w-4', cursor: 'cursor-nwse-resize' },
+}
+
+/**
+ * 按拖拽方向算出新矩形。
+ *
+ * 从西/北边往内拖到最小尺寸时，位置要跟着**停住**（不能再继续往里推），
+ * 否则窗口会被越推越远、看起来像在"逃跑"。
+ */
+function resizeBy(
+  start: { x: number; y: number; w: number; h: number },
+  dir: ResizeDir,
+  dx: number,
+  dy: number,
+): { x: number; y: number; w: number; h: number } {
+  let { x, y, w, h } = start
+  if (dir.includes('e')) w = start.w + dx
+  if (dir.includes('s')) h = start.h + dy
+  if (dir.includes('w')) {
+    w = start.w - dx
+    x = start.x + dx
+  }
+  if (dir.includes('n')) {
+    h = start.h - dy
+    y = start.y + dy
+  }
+  if (w < MINI_MIN_W) {
+    if (dir.includes('w')) x = start.x + (start.w - MINI_MIN_W)
+    w = MINI_MIN_W
+  }
+  if (h < MINI_MIN_H) {
+    if (dir.includes('n')) y = start.y + (start.h - MINI_MIN_H)
+    h = MINI_MIN_H
+  }
+  return { x, y, w, h }
+}
+
+/**
+ * 歌词"不覆盖颜色"时用的两种墨色（= tailwind 的 ink-900 / ink-400）。
+ * 写在这里只是为了让设置面板的"默认"按钮能如实提示它回落到哪个颜色。
+ */
+const DEFAULT_INK_ACTIVE = '#0f0d0b'
+const DEFAULT_INK_IDLE = '#8d836d'
 
 /** 把坐标夹进视口内：小窗**整体**留在屏内，标题栏永远够得着（否则拖飞了就再也拿不回来） */
 function clampMiniPos(pos: MiniPos, width: number, height: number): MiniPos {
@@ -88,13 +157,27 @@ export function LyricsView({
    */
   const [dragPos, setDragPos] = useState<MiniPos | null>(null)
   const [dragging, setDragging] = useState(false)
+  /** 缩放中的实时矩形（w/h + 位置，因为拉西/北边会同时挪位置） */
+  const [resizeRect, setResizeRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
+  const [resizing, setResizing] = useState<ResizeDir | null>(null)
+  const resizeRef = useRef<{ dir: ResizeDir; startX: number; startY: number; rect: { x: number; y: number; w: number; h: number } } | null>(null)
   const [appearanceOpen, setAppearanceOpen] = useState(false)
   const appearanceRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   /** 拖动状态放 ref：两次 pointer 事件之间不能指望有一次 React 重渲染 */
   const dragRef = useRef<{ dx: number; dy: number; w: number; h: number; pos: MiniPos | null } | null>(null)
   const mini = prefs.panel === 'mini'
-  const miniPos = dragPos ?? prefs.miniPos
+  /** 位置：缩放中由缩放说话，否则用拖动结果 / 存下来的位置 */
+  const miniPos = resizeRect ?? dragPos ?? prefs.miniPos
+  /** 尺寸：缩放中实时，否则用存下来的值（null = 默认尺寸） */
+  const miniSize = resizeRect ? { w: resizeRect.w, h: resizeRect.h } : prefs.miniSize
+  /**
+   * 小窗放大之后**多显示几句**，而不是把多出来的地方留白。
+   * 一行约 30px×字号档位，标题栏约 40px；算不准顶多少显示一行，不会溢出。
+   */
+  const miniRows = miniSize
+    ? Math.min(13, Math.max(3, Math.floor((miniSize.h - 40) / (30 * LYRIC_FONT_FACTOR[prefs.fontScale]))))
+    : 3
 
   const resolved = useMemo(
     () => resolveLyrics(snapshot.state.text, snapshot.audio),
@@ -179,11 +262,62 @@ export function LyricsView({
     if (d?.pos) setLyricPrefs({ miniPos: d.pos })
   }
 
-  /** 双击标题栏回到默认位置（拖到不喜欢的地方时不用在屏幕上找角度） */
+  /**
+   * 双击标题栏：位置和大小一起回到默认。
+   *
+   * 为什么大小也放这儿、而不是双击框：缩放要 `preventDefault()`（否则拖动过程中
+   * 会顺手选中整页文字），而 pointerdown 被 preventDefault 之后浏览器就不再补发
+   * 那套兼容鼠标事件，`dblclick` 根本不会来。标题栏本来就有点击语义（拖动），
+   * 一个地方记住"双击 = 复位"比两处各有一套更好记。
+   */
   function onDragReset(e: React.MouseEvent<HTMLElement>) {
     if (!mini) return
     if ((e.target as HTMLElement).closest('button')) return
-    setLyricPrefs({ miniPos: null })
+    setLyricPrefs({ miniPos: null, miniSize: null })
+  }
+
+  /** 抓住某条边框开始缩放 */
+  function onResizeStart(dir: ResizeDir, e: React.PointerEvent<HTMLElement>) {
+    if (!mini) return
+    const el = panelRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    resizeRef.current = {
+      dir,
+      startX: e.clientX,
+      startY: e.clientY,
+      rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+    }
+    setResizing(dir)
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {
+      // 个别输入设备给不了捕获：退化成普通移动事件
+    }
+    // 缩放要顺手，不能让拖动误触标题栏的双击复位
+    e.stopPropagation()
+    e.preventDefault()
+  }
+
+  function onResizeMove(e: React.PointerEvent<HTMLElement>) {
+    const d = resizeRef.current
+    if (!d) return
+    const next = resizeBy(d.rect, d.dir, e.clientX - d.startX, e.clientY - d.startY)
+    // 不能超出视口（右下角那两个方向尤其容易拖出去）
+    next.w = Math.min(next.w, window.innerWidth - 2 * MINI_MARGIN)
+    next.h = Math.min(next.h, window.innerHeight - 2 * MINI_MARGIN)
+    const clamped = clampMiniPos({ x: next.x, y: next.y }, next.w, next.h)
+    setResizeRect({ ...next, x: clamped.x, y: clamped.y })
+  }
+
+  function onResizeEnd() {
+    const d = resizeRef.current
+    resizeRef.current = null
+    setResizing(null)
+    const rect = resizeRect
+    setResizeRect(null)
+    if (!d || !rect) return
+    setLyricPrefs({ miniSize: { w: rect.w, h: rect.h }, miniPos: { x: rect.x, y: rect.y } })
   }
 
   return (
@@ -197,6 +331,8 @@ export function LyricsView({
               backgroundColor: `rgba(255, 255, 255, ${prefs.miniOpacity})`,
               textShadow: '0 0 5px rgba(255, 255, 255, 0.75)',
               ...(miniPos ? { left: miniPos.x, top: miniPos.y, right: 'auto', bottom: 'auto' } : {}),
+              // 拉过边框就用固定尺寸；没拉过保持默认（宽度 21rem、高度跟内容走）
+              ...(miniSize ? { width: miniSize.w, height: miniSize.h } : {}),
             }
           : undefined
       }
@@ -221,7 +357,7 @@ export function LyricsView({
         onPointerUp={onDragEnd}
         onPointerCancel={onDragEnd}
         onDoubleClick={onDragReset}
-        title={mini ? '按住标题栏拖到任意位置 · 双击回到右下角' : undefined}
+        title={mini ? '按住标题栏拖到任意位置 · 拖动边框改大小 · 双击复位' : undefined}
         className={
           prefs.panel === 'mini'
             ? `relative flex items-center justify-between gap-2 px-3 py-2 select-none touch-none ${
@@ -230,22 +366,35 @@ export function LyricsView({
             : 'relative flex shrink-0 items-center justify-between gap-3 border-b border-ink-200/60 bg-white/60 px-4 py-3 backdrop-blur'
         }
       >
+        {/*
+          整屏的标题：居中、放大、蓝色。
+          绝对定位居中而不是靠 flex 居中——右侧还有「小窗/关闭」两个按钮，
+          用 flex 会把标题挤偏（左边永远是空的，右边两个图标）。
+          宽度上限留住两侧按钮的位置，太长就截断，不会压到按钮上。
+        */}
+        {prefs.panel !== 'mini' && (
+          <span
+            className="pointer-events-none absolute left-1/2 top-1/2 w-[min(64%,46rem)] -translate-x-1/2 -translate-y-1/2 truncate text-center font-serif text-2xl font-semibold text-blue-700 md:text-3xl"
+            title={`${snapshot.label}${snapshot.state.author ? ` - ${snapshot.state.author}` : ''}`}
+          >
+            {snapshot.label}
+            {snapshot.state.author && <span className="font-normal"> - {snapshot.state.author}</span>}
+          </span>
+        )}
         <div className="flex min-w-0 items-center gap-1">
           {/* 抓手：告诉人"这里能拖"（整条标题栏都能拖，图标只是提示） */}
           {prefs.panel === 'mini' && (
             <GripHorizontal className={`h-4 w-4 shrink-0 ${dragging ? 'text-ink-600' : 'text-ink-300'}`} aria-hidden />
           )}
           {/* 诗词一律「诗名 - 作者」：这里是标题，不是歌词来源的说明牌 */}
-          <span
-            className={`truncate font-serif font-semibold text-ink-800 ${
-              prefs.panel === 'mini' ? 'text-sm' : 'text-lg'
-            }`}
-          >
-            {snapshot.label}
-            {snapshot.state.author && <span className="font-normal text-ink-500"> - {snapshot.state.author}</span>}
-          </span>
+          {prefs.panel === 'mini' && (
+            <span className="truncate font-serif text-sm font-semibold text-ink-800">
+              {snapshot.label}
+              {snapshot.state.author && <span className="font-normal text-ink-500"> - {snapshot.state.author}</span>}
+            </span>
+          )}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="ml-auto flex shrink-0 items-center gap-1">
           {/* 小窗外观（透明度/边框/字号）：小窗很窄，只有图标 */}
           {prefs.panel === 'mini' && (
             <button
@@ -292,9 +441,23 @@ export function LyricsView({
             </p>
           </div>
         ) : prefs.panel === 'mini' ? (
-          <MiniStage lines={lines} index={index} factor={factor} />
+          <MiniStage
+            lines={lines}
+            index={index}
+            factor={factor}
+            rows={miniRows}
+            inkActive={prefs.inkActive}
+            inkIdle={prefs.inkIdle}
+          />
         ) : (
-          <LyricStage lines={lines} index={index} style={prefs.style} factor={factor} />
+          <LyricStage
+            lines={lines}
+            index={index}
+            style={prefs.style}
+            factor={factor}
+            inkActive={prefs.inkActive}
+            inkIdle={prefs.inkIdle}
+          />
         )}
       </div>
 
@@ -376,6 +539,27 @@ export function LyricsView({
           <MiniAppearance anchorRef={appearanceRef} onClose={() => setAppearanceOpen(false)} />,
           document.body,
         )}
+
+      {/*
+        八条边框抓手：贴着边框排在内侧（面板有 overflow-hidden，放到外面会被裁掉）。
+        最小尺寸与视口边界都在 resizeBy / onResizeMove 里夹住了。
+      */}
+      {mini &&
+        RESIZE_DIRS.map((dir) => (
+          <span
+            key={dir}
+            data-resize={dir}
+            onPointerDown={(e) => onResizeStart(dir, e)}
+            onPointerMove={onResizeMove}
+            onPointerUp={onResizeEnd}
+            onPointerCancel={onResizeEnd}
+            title={dir === 'se' ? '拖动边框改变大小（双击标题栏复位）' : undefined}
+            aria-hidden
+            className={`absolute z-10 touch-none select-none ${RESIZE_HANDLE[dir].pos} ${RESIZE_HANDLE[dir].cursor} ${
+              resizing === dir ? 'bg-ink-300/30' : ''
+            }`}
+          />
+        ))}
     </div>
   )
 }
@@ -390,8 +574,12 @@ export function LyricsView({
  */
 function LyricBackdrop({ snapshot, show }: { snapshot: Snapshot; show: boolean }) {
   const theme = poetryThemes[Math.min(Math.max(snapshot.state.themeIndex, 0), poetryThemes.length - 1)]
-  // 背景在 state 上（渲染态），不在记录顶层——和卡片用的是同一份
-  const bg = snapshot.state.background
+  // 背景在 state 上（渲染态），不在记录顶层——和卡片用的是同一份。
+  // 列表不下发配图，这里按需取回：取回前先用缩略图铺满并**模糊**，
+  // 既不是一块空白，也不会把 240px 的小图硬拉成满屏的糊点。
+  const { background, placeholder } = useCardBackground(snapshot)
+  const bg = background ?? placeholder
+  const soft = !background && Boolean(placeholder)
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
       {/* 底层永远是主题纸底：没有配图时它就是背景本身 */}
@@ -404,6 +592,7 @@ function LyricBackdrop({ snapshot, show }: { snapshot: Snapshot; show: boolean }
               backgroundImage: `url("${bg.dataUrl}")`,
               backgroundSize: 'cover',
               backgroundPosition: 'center',
+              ...(soft ? { filter: 'blur(16px)', transform: 'scale(1.06)' } : {}),
             }}
           />
           <div className="absolute inset-0" style={{ background: theme.background, opacity: bg.scrim }} />
@@ -414,13 +603,30 @@ function LyricBackdrop({ snapshot, show }: { snapshot: Snapshot; show: boolean }
   )
 }
 
-/** 小窗里的歌词：前后各一句 + 当前句，做成"滚动三行" */
-function MiniStage({ lines, index, factor }: { lines: LyricLine[]; index: number; factor: number }) {
-  const from = Math.min(Math.max(index - 1, 0), Math.max(0, lines.length - 3))
-  const window3 = lines.slice(from, from + 3)
+/** 小窗里的歌词：围着当前句滚动若干行（窗口拉大就多显示几句） */
+function MiniStage({
+  lines,
+  index,
+  factor,
+  rows = 3,
+  inkActive,
+  inkIdle,
+}: {
+  lines: LyricLine[]
+  index: number
+  factor: number
+  rows?: number
+  inkActive: string | null
+  inkIdle: string | null
+}) {
+  const count = Math.max(3, rows)
+  // 当前句尽量居中：上面留 (count-1)/2 行
+  const before = Math.floor((count - 1) / 2)
+  const from = Math.min(Math.max(index - before, 0), Math.max(0, lines.length - count))
+  const windowLines = lines.slice(from, from + count)
   return (
     <div className="flex flex-col py-1.5">
-      {window3.map((line, i) => {
+      {windowLines.map((line, i) => {
         const globalIndex = from + i
         const active = globalIndex === index
         return (
@@ -431,7 +637,11 @@ function MiniStage({ lines, index, factor }: { lines: LyricLine[]; index: number
             className={`truncate px-3 py-1 text-left font-serif transition-all ${
               active ? 'font-medium text-ink-900' : 'text-ink-400 opacity-70 hover:opacity-100'
             }`}
-            style={{ fontSize: (active ? 17 : 14) * factor }}
+            style={{
+              fontSize: (active ? 17 : 14) * factor,
+              // 设过颜色就用它覆盖默认墨色（没设过一律不动，保持原来的样子）
+              color: (active ? inkActive : inkIdle) ?? undefined,
+            }}
           >
             {line.text}
           </button>
@@ -489,7 +699,8 @@ function MiniAppearance({
   const prefs = useLyricPrefs()
   const boxRef = useRef<HTMLDivElement>(null)
   const [pos] = useState(() => {
-    const box = { width: 258, height: 170 }
+    // 高度估算：加了"颜色"两行之后面板更高了，估算偏小会让浮层钻出屏幕底部
+    const box = { width: 258, height: 268 }
     const r = anchorRef.current?.getBoundingClientRect()
     if (!r) return { top: 80, right: 16, ...box }
     const below = r.bottom + 6
@@ -555,6 +766,43 @@ function MiniAppearance({
           <span className="block text-[11px] text-ink-400">关掉就是浮在内容上的一层歌词</span>
         </span>
       </label>
+
+      {/* 颜色：小窗面板窄，用紧凑排版（标签一行、色块铺满） */}
+      <div className="mt-2.5 flex flex-col gap-1.5">
+        <InkRow
+          compact
+          label="当前句颜色"
+          value={prefs.inkActive ?? undefined}
+          themeColor={DEFAULT_INK_ACTIVE}
+          followLabel="默认"
+          followHint={`用歌词本来的墨色（${DEFAULT_INK_ACTIVE}），不覆盖`}
+          onChange={(v) => setLyricPrefs({ inkActive: v ?? null })}
+        />
+        <InkRow
+          compact
+          label="其他句颜色"
+          value={prefs.inkIdle ?? undefined}
+          themeColor={DEFAULT_INK_IDLE}
+          followLabel="默认"
+          followHint={`用歌词本来的浅墨色（${DEFAULT_INK_IDLE}），不覆盖`}
+          onChange={(v) => setLyricPrefs({ inkIdle: v ?? null })}
+        />
+      </div>
+
+      {/*
+        大小与位置复位：标题栏双击也能复位，但那是个"藏起来的手势"——
+        拖了半天想收回去的人未必想得到。这里给一个看得见的按钮。
+      */}
+      {(prefs.miniPos || prefs.miniSize) && (
+        <button
+          onClick={() => setLyricPrefs({ miniPos: null, miniSize: null })}
+          title="回到默认大小与右下角位置"
+          className="mt-2.5 flex w-full items-center justify-center gap-1 rounded-md border border-ink-200 bg-white px-2 py-1.5 text-[11px] text-ink-600 transition hover:border-ink-400 hover:text-ink-900"
+        >
+          <RotateCcw className="h-3 w-3" />
+          恢复默认大小与位置
+        </button>
+      )}
 
       <div className="mt-2.5 flex items-center justify-between">
         <span className="text-[11px] font-medium text-ink-700">字号</span>
@@ -648,6 +896,26 @@ function MiniAppearance({
         ))}
       </div>
 
+      <div className="mt-2.5 mb-1.5 text-[11px] font-medium text-ink-700">颜色</div>
+      <div className="flex flex-col gap-1.5">
+        <InkRow
+          label="当前句"
+          value={prefs.inkActive ?? undefined}
+          themeColor={DEFAULT_INK_ACTIVE}
+          followLabel="默认"
+          followHint={`用歌词本来的墨色（${DEFAULT_INK_ACTIVE}），不覆盖`}
+          onChange={(v) => setLyricPrefs({ inkActive: v ?? null })}
+        />
+        <InkRow
+          label="其他句"
+          value={prefs.inkIdle ?? undefined}
+          themeColor={DEFAULT_INK_IDLE}
+          followLabel="默认"
+          followHint={`用歌词本来的浅墨色（${DEFAULT_INK_IDLE}），不覆盖`}
+          onChange={(v) => setLyricPrefs({ inkIdle: v ?? null })}
+        />
+      </div>
+
       <div className="mt-2.5 flex items-center justify-between">
         <span className="text-[11px] font-medium text-ink-700">字号</span>
         <span className="flex rounded-full border border-ink-200 bg-white p-0.5">
@@ -703,14 +971,22 @@ function LyricStage({
   index,
   style,
   factor,
+  inkActive,
+  inkIdle,
 }: {
   lines: LyricLine[]
   index: number
   style: LyricStyle
   factor: number
+  inkActive: string | null
+  inkIdle: string | null
 }) {
-  if (style === 'vertical') return <VerticalStage lines={lines} index={index} factor={factor} />
-  if (style === 'single') return <SingleStage lines={lines} index={index} factor={factor} />
+  if (style === 'vertical') {
+    return <VerticalStage lines={lines} index={index} factor={factor} inkActive={inkActive} inkIdle={inkIdle} />
+  }
+  if (style === 'single') {
+    return <SingleStage lines={lines} index={index} factor={factor} inkActive={inkActive} />
+  }
   const compact = style === 'compact'
   const base = compact ? BASE.compact : BASE.center
   const lineH = base.line * factor
@@ -736,6 +1012,7 @@ function LyricStage({
               style={{
                 height: lineH,
                 fontSize: (active ? base.active : base.idle) * factor,
+                color: (active ? inkActive : inkIdle) ?? undefined,
               }}
               className={`mx-auto flex w-full max-w-2xl items-center px-6 font-serif transition-all duration-300 ${
                 compact ? 'justify-start gap-2' : 'justify-center text-center'
@@ -770,14 +1047,24 @@ function LyricStage({
 }
 
 /** 单句大字：一屏只有当前句 */
-function SingleStage({ lines, index, factor }: { lines: LyricLine[]; index: number; factor: number }) {
+function SingleStage({
+  lines,
+  index,
+  factor,
+  inkActive,
+}: {
+  lines: LyricLine[]
+  index: number
+  factor: number
+  inkActive: string | null
+}) {
   const line = lines[Math.max(0, index)]
   return (
     <div className="flex h-full items-center justify-center px-8">
       <button
         onClick={() => seek(line.start)}
         title="跳到这一句"
-        style={{ fontSize: BASE.single.active * factor }}
+        style={{ fontSize: BASE.single.active * factor, color: inkActive ?? undefined }}
         className="font-serif font-medium leading-snug text-ink-900 transition-all duration-300 hover:opacity-80"
       >
         {line.text}
@@ -791,10 +1078,14 @@ function VerticalStage({
   lines,
   index,
   factor,
+  inkActive,
+  inkIdle,
 }: {
   lines: LyricLine[]
   index: number
   factor: number
+  inkActive: string | null
+  inkIdle: string | null
 }) {
   const colW = BASE.vertical.col * factor
   return (
@@ -820,6 +1111,7 @@ function VerticalStage({
                 writingMode: 'vertical-rl',
                 textOrientation: 'upright',
                 letterSpacing: '0.18em',
+                color: (active ? inkActive : inkIdle) ?? undefined,
               }}
               className={`flex h-full shrink-0 items-center justify-center font-serif transition-colors duration-300 ${
                 active ? 'font-medium text-ink-900' : 'text-ink-400 opacity-60 hover:opacity-100'
